@@ -1,4 +1,4 @@
-Сверка перевода (CrossbellCompare) 2.2 — Trails from Zero / Trails to Azure
+Сверка перевода (CrossbellCompare) 0.1 — Trails from Zero / Trails to Azure
 
 ЧТО ДЕЛАЕТ
   Показывает текст двух языков рядом (японский, английский или русский — в любой паре; обычно оригинал

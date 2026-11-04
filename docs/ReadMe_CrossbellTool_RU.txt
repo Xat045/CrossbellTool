@@ -1,4 +1,4 @@
-CrossbellTool 2.5 — разборка и сборка файлов Trails from Zero и Trails to Azure (PC)
+CrossbellTool 0.1 — разборка и сборка файлов Trails from Zero и Trails to Azure (PC)
   The Legend of Heroes: Trails from Zero   (zero.exe)
   The Legend of Heroes: Trails to Azure    (ao.exe)
 

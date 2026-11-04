@@ -1,4 +1,4 @@
-CrossbellTool 2.5: decompiles and builds the files of Trails from Zero and Trails to Azure (PC)
+CrossbellTool 0.1: decompiles and builds the files of Trails from Zero and Trails to Azure (PC)
   The Legend of Heroes: Trails from Zero   (zero.exe)
   The Legend of Heroes: Trails to Azure    (ao.exe)
 

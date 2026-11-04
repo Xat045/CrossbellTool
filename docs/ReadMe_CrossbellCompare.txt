@@ -1,4 +1,4 @@
-CrossbellCompare 2.2: translation compare for Trails from Zero / Trails to Azure
+CrossbellCompare 0.1: translation compare for Trails from Zero / Trails to Azure
 
 WHAT IT DOES
   Shows the text of two languages side by side (Japanese, English or Russian, in any pair; usually the original
