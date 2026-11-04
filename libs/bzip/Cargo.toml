@@ -1,0 +1,9 @@
+[package]
+name = "bzip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+gospel.path = "../gospel"
+bitmatch = "0.1.1"
+thiserror = "1.0.38"

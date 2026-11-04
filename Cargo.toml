@@ -1,0 +1,33 @@
+[workspace]
+members = [
+	"tool",
+	"libs/cp932",
+	"libs/bc7",
+	"libs/bzip",
+	"libs/gospel",
+	"libs/gospel-dump",
+	"libs/themelios-macros",
+	"libs/themelios-common",
+	"libs/themelios-scena",
+	"libs/themelios-archive",
+	"libs/themelios",
+	"libs/calmare",
+	"libs/cradle",
+	"libs/ingert",
+	"libs/ingert-syntax",
+]
+resolver = "2"
+
+[workspace.package]
+version = "1.1.2"
+
+[workspace.dependencies]
+indexmap = "2.8.0"
+
+[profile.dev]
+package.cp932.opt-level = 3
+package.bzip.opt-level = 3
+package.bc7.opt-level = 3
+
+[profile.release]
+debug = false

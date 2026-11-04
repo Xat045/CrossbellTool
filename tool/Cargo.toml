@@ -1,0 +1,48 @@
+[package]
+name = "crossbell-tool"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+name = "crossbell_tool"
+path = "src/lib.rs"
+
+[[bin]]
+name = "CrossbellTool"
+path = "src/main.rs"
+
+[[bin]]
+name = "CrossbellCompare"
+path = "src/kcompare_main.rs"
+
+[dependencies]
+calmare.path = "../libs/calmare"
+themelios.path = "../libs/themelios"
+cradle.path = "../libs/cradle"
+cp932.path = "../libs/cp932"
+codespan-reporting = "0.11.1"
+image = { version = "0.24.5", default-features = false, features = ["png"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rust_xlsxwriter = { version = "0.80", default-features = false }
+calamine = "0.26"
+block_compression = { version = "0.10.0", default-features = false, features = ["bc7", "bc15"] }
+ingert = { path = "../libs/ingert" }
+ingert-syntax = { path = "../libs/ingert-syntax" }
+lz4_flex = "0.11"
+ruzstd = "0.8"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
+egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
+
+[target.'cfg(unix)'.dependencies]
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false }
+raw-window-handle = "0.6"
+
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_UI_Shell", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Controls", "Win32_Storage_FileSystem", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Registry"] }
+
+[build-dependencies]
+embed-manifest = "1.4"
