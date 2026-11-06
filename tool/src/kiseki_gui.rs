@@ -302,6 +302,7 @@ impl App {
 			scena: true,
 			tables: true,
 			textures: true,
+			other: true,
 			tex_dds: self.tex_dds,
 			check: !self.skip_check,
 			mask: self.mask.trim().to_string(),

@@ -8,5 +8,6 @@ pub mod jobs;
 pub mod p3a;
 pub mod scena;
 pub mod tbl;
+pub mod tbl_json;
 pub mod compare;
 pub mod checks;

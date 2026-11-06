@@ -535,6 +535,7 @@ dependencies = [
  "rfd",
  "rust_xlsxwriter",
  "ruzstd",
+ "serde",
  "serde_json",
  "themelios",
  "windows-sys 0.59.0",

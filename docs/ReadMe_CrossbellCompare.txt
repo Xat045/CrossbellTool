@@ -1,4 +1,4 @@
-CrossbellCompare 0.1: translation compare for Trails from Zero / Trails to Azure
+CrossbellCompare 0.2: translation compare for Trails from Zero / Trails to Azure
 
 WHAT IT DOES
   Shows the text of two languages side by side (Japanese, English or Russian, in any pair; usually the original
@@ -62,8 +62,9 @@ WHAT IT DOES
     (the number has no leading zeros: #0005F = #5F); lost or extra special signs
     (♥ ♪ ★ ☆ ◆ ━ ∴ ※ ← → ① ② ③ Ⅰ Ⅱ Ⅲ); broken text: a '\' in the middle of a line and code fragments
     (what remains of {x01}). What the codes mean: the 'Service codes' section at the end of this file.
-  • 'Not translated': scene lines in English or Japanese (tables are not checked; identical ones
-    on one line; debug scenes a0… are not checked).
+  • 'Not translated': scene lines left untranslated, fully or partly (tables are not checked; identical ones
+    on one line; debug scenes a0… are not checked). For a Japanese and English pair, Japanese text is searched
+    for in the English files.
   • 'Placeholders': %d, %s… not as many as in the original.
   • Identical errors are grouped: 'missing: {color 0}, 173 lines', the files and an example;
     'Show all' expands the group, 'Not an error · all' hides it entirely.

@@ -11,7 +11,7 @@ pub const CAT_KEYS: [&str; 3] = ["\u{0421}\u{043b}\u{0443}\u{0436}\u{0435}\u{043
 pub fn cats() -> [(&'static str, &'static str, u8); 3] {
 	[
 	(tr("Служебные коды", "Service codes"), tr("Цвет <C…>/</C>, коды {11}{…}, {16}, {7}, теги <K>, <E…>, <B>… не совпадают с оригиналом. И сломанный перенос: \\ без n.", "Color <C…>/</C>, codes {11}{…}, {16}, {7}, tags <K>, <E…>, <B>… don't match the original. Also a broken line break: \\ without n."), 0),
-	(tr("Не переведено", "Not translated"), tr("Реплика сцены осталась без перевода (английский или японский текст). Таблицы и интерфейс не проверяются. Одинаковые тексты собраны в одну строку, в скобках — сколько раз.", "A scene line was left untranslated (English or Japanese text). Tables and the interface are not checked. Identical texts are gathered into one line, with the count in brackets."), 1),
+	(tr("Не переведено", "Not translated"), tr("Реплика сцены осталась без перевода целиком или частично (английский или японский текст). Для пары японский и английский ищется японский текст в английских файлах. Таблицы и интерфейс не проверяются. Одинаковые тексты собраны в одну строку, в скобках — сколько раз.", "A scene line is left untranslated, fully or partly (English or Japanese text). For a Japanese and English pair, Japanese text is searched for in the English files. Tables and the interface are not checked. Identical texts are collected in one line, with the count in brackets."), 1),
 	(tr("Подстановки", "Placeholders"), tr("%d, %s, %.1f… — места, куда игра подставляет число или имя: в переводе их не столько же, сколько в оригинале. Игра покажет не то или упадёт.", "%d, %s, %.1f… are places where the game inserts a number or a name: the translation does not have as many as the original. The game will show the wrong thing or crash."), 0),
 ]
 }
@@ -170,6 +170,62 @@ fn latin_words(s: &str) -> Vec<String> {
 	out
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Target {
+	Russian,
+	English,
+	Japanese,
+}
+
+fn target_lang(d: &Data) -> Target {
+	let (mut total, mut src_jp, mut tgt_jp, mut tgt_cyr) = (0usize, 0usize, 0usize, 0usize);
+	for p in &d.pairs {
+		let (Some(en), Some(ru)) = (&p.en, &p.ru) else { continue };
+		if p.service || is_debug(&p.file) || !is_dialogue(&p.file) {
+			continue;
+		}
+		total += 1;
+		src_jp += has_jp(&strip(&en.text)) as usize;
+		tgt_jp += has_jp(&strip(&ru.text)) as usize;
+		tgt_cyr += has_cyr(&ru.text) as usize;
+	}
+	if tgt_cyr > 0 && tgt_cyr * 100 >= total {
+		return Target::Russian;
+	}
+	match (src_jp * 2 > total, tgt_jp * 2 > total) {
+		(true, false) => Target::English,
+		(false, true) => Target::Japanese,
+		_ => Target::Russian,
+	}
+}
+
+fn leftover_jp(s: &str) -> Option<String> {
+	let jp: String = s.chars().filter(|c| ('\u{3041}'..='\u{3096}').contains(c) || ('\u{30a1}'..='\u{30fa}').contains(c) || ('\u{4e00}'..='\u{9fff}').contains(c)).collect();
+	(jp.chars().count() >= 2).then_some(jp)
+}
+
+fn leftover(s: &str) -> Option<String> {
+	if let Some(jp) = leftover_jp(s) {
+		return Some(jp);
+	}
+	let mut run: Vec<&str> = Vec::new();
+	let upper = |w: &&str| w.starts_with(|c: char| c.is_ascii_uppercase());
+	let good = |run: &[&str]| run.len() >= 3 && run.iter().filter(|w| w.len() >= 2 && w.starts_with(|c: char| c.is_ascii_lowercase())).count() >= 2 && !(upper(&run[0]) && upper(&run[run.len() - 1]));
+	for tok in s.split_whitespace() {
+		let w = tok.trim_matches(|c: char| !c.is_alphanumeric());
+		let latin = !w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic() || c == '\'' || c == '’' || c == '-');
+		if latin {
+			run.push(w);
+			continue;
+		}
+		if good(&run) {
+			return Some(run.join(" "));
+		}
+		run.clear();
+	}
+	good(&run).then(|| run.join(" "))
+}
+
 pub fn specs(t: &str) -> Vec<String> {
 	let c: Vec<char> = t.chars().collect();
 	let mut out = Vec::new();
@@ -288,6 +344,7 @@ fn symbols_ed7(en: &str, ru: &str) -> Option<String> {
 
 pub fn run(d: &Data) -> Report {
 	let mut r = Report::default();
+	let target = target_lang(d);
 	for w in &d.warnings {
 		r.findings.push(Finding { cat: CAT_CODES, pair: NO_PAIR, what: w.clone() });
 	}
@@ -322,10 +379,21 @@ pub fn run(d: &Data) -> Report {
 				continue;
 			}
 			let rs_clean = strip(&ru.text);
-			if ru.text.trim() == en.text.trim() || !latin_words(&rs_clean).is_empty() || has_jp(&rs_clean) {
-				r.findings.push(Finding { cat: CAT_UNTR, pair: i, what: String::new() });
+			let untranslated = match target {
+				Target::Russian => ru.text.trim() == en.text.trim() || !latin_words(&rs_clean).is_empty() || has_jp(&rs_clean),
+				Target::English => leftover_jp(&rs_clean).is_some(),
+				Target::Japanese => !has_jp(&rs_clean) && !latin_words(&rs_clean).is_empty(),
+			};
+			if untranslated {
+				let part = target == Target::English && !latin_words(&rs_clean).is_empty();
+				r.findings.push(Finding { cat: CAT_UNTR, pair: i, what: if part { leftover_jp(&rs_clean).unwrap_or_default() } else { String::new() } });
 			}
 			continue;
+		}
+		if !debug && is_dialogue(&p.file) {
+			if let Some(w) = leftover(&strip(&ru.text)) {
+				r.findings.push(Finding { cat: CAT_UNTR, pair: i, what: w });
+			}
 		}
 		let (te, tr) = if has_jp(&en.text) { (jp_free(tokens(&en.text)), jp_free(tokens(&ru.text))) } else { (tokens(&en.text), tokens(&ru.text)) };
 		if let Some(w) = lost_extra(te, tr) {
@@ -367,6 +435,19 @@ mod tests {
 		assert!(broken_newline("a\\b", "а\\б\\n").unwrap().starts_with("\\n"));
 		assert!(broken_newline("a", "а\\ б").unwrap().starts_with(tr("\\ без", "\\ without")));
 		assert_eq!(latin_words("Привет, CID и tPhone-X"), vec!["CID", "tPhone-X"]);
+	}
+
+	#[test]
+	fn leftovers() {
+		let s = "Честно говоря, мне следовало давать им больше opportunities like this while I was still a student.";
+		assert_eq!(leftover(s).as_deref(), Some("opportunities like this while I was still a student"));
+		assert!(leftover("Давай найдём Ivy в баре").is_none());
+		assert!(leftover("Это бар Black Rose Lounge в центре").is_none());
+		assert!(leftover("Привет, CID и tPhone-X").is_none());
+		assert_eq!(leftover("Он сказал 来てください и ушёл").as_deref(), Some("来てください"));
+		assert!(leftover("Не пропустите! ♪ ヽ(*ﾟ∀ﾟ)ﾉ").is_none());
+		assert!(leftover("Он замолчал ・・・・ и ушёл").is_none());
+		assert!(leftover("Книга Trails in the Database на полке").is_none());
 	}
 
 	#[test]

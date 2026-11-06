@@ -48,6 +48,7 @@ fn cli(args: Vec<String>) -> i32 {
 		scena: true,
 		tables: true,
 		textures: true,
+		other: false,
 		tex_dds: false,
 		check: true,
 		mask: String::new(),
@@ -76,6 +77,7 @@ fn cli(args: Vec<String>) -> i32 {
 				o.scena = t.contains("scena");
 				o.tables = t.contains("table");
 				o.textures = t.contains("texture");
+				o.other = t.contains("other");
 			}
 			"--all" => o.only_changed = false,
 			"--overwrite" => o.overwrite_edited = true,

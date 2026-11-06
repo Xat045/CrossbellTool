@@ -40,6 +40,7 @@ pub struct Pair {
 	pub en_key: String,
 	pub ru_key: String,
 	pub service: bool,
+	pub who: Option<u32>,
 }
 
 #[derive(Default)]
@@ -186,11 +187,32 @@ fn plain_strings(code: &str) -> String {
 	out
 }
 
+fn speaker_of(key: &str) -> Option<u32> {
+	key.split_once('|')?.1.strip_prefix("system[5,6](")?.split(',').next()?.trim().parse().ok()
+}
+
+pub fn speaker_face(game: &str, id: u32) -> Option<u32> {
+	static T: std::sync::OnceLock<Vec<(&'static str, u32, u32)>> = std::sync::OnceLock::new();
+	let t = T.get_or_init(|| {
+		include_str!("speakers.tsv")
+			.lines()
+			.filter_map(|l| {
+				let mut c = l.split('\t');
+				Some((c.next()?, c.next()?.parse().ok()?, c.next()?.parse().ok()?))
+			})
+			.collect()
+	});
+	t.iter().find(|x| x.0 == game && x.1 == id).map(|x| x.2)
+}
+
 fn read_json(path: &Path) -> Result<Vec<Item>, String> {
 	let src = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
 	let v: serde_json::Value = serde_json::from_str(src.trim_start_matches('\u{feff}')).map_err(|e| lformat!("ошибка JSON: {e}", "JSON error: {e}"))?;
 	if v.get("kiseki").and_then(|k| k.as_str()) == Some(crate::scena_json::MAGIC) {
 		return Ok(read_ed7_json(&src, &v, true));
+	}
+	if v.get("headers").is_some() && v.get("kiseki").is_none() {
+		return Ok(super::tbl_json::texts(&v).into_iter().enumerate().map(|(n, (id, text))| Item { key: id.clone(), id, text, line: n + 2 }).collect());
 	}
 	if v.get("kiseki").and_then(|k| k.as_str()) != Some("kai-scena") {
 		return Err(tr("не файл диалогов CrossbellTool", "not a dialogue file of CrossbellTool").into());
@@ -411,7 +433,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 			walk(&e.path(), out);
 		} else {
 			let l = n.to_lowercase();
-			let ed7_raw = ed7().is_some() && (l.ends_with(".bin") || l.ends_with("._dt"));
+			let ed7_raw = ed7().is_some() && (l.ends_with(".bin") || l.ends_with("._dt") || l.ends_with(".dt2"));
 			if !n.starts_with("~$") && (l.ends_with(".json") || l.ends_with(".xlsx") || l.ends_with(".yaml") || ed7_raw) {
 				out.push(e.path());
 			}
@@ -429,10 +451,14 @@ fn file_key(rel: &str) -> Option<String> {
 		if (name.ends_with(".json") || name.ends_with(".bin")) && dirs.iter().any(|d| d.starts_with("scena")) {
 			return Some(format!("scena/{stem}"));
 		}
-		if (name.ends_with(".xlsx") || name.ends_with("._dt")) && stem.starts_with("t_") && !stem.contains(' ') && crate::dt::is_supported(stem) {
-			return Some(format!("table/{stem}"));
+		if (name.ends_with(".xlsx") || name.ends_with("._dt") || name.ends_with(".dt2")) && !stem.contains(' ') && crate::dt::is_supported(stem) {
+			return Some(format!("table/{}", stem.strip_suffix("_us").filter(|s| *s == "monsnote").unwrap_or(stem)));
 		}
 		return None;
+	}
+	if l.ends_with(".json") && l.split('/').any(|d| d == "table" || d == "table_en" || d == "table_eng") {
+		let name = l.rsplit('/').next()?;
+		return Some(format!("table/{}.xlsx", name.trim_end_matches(".json")));
 	}
 	if l.ends_with(".json") {
 		let p = l.rfind("script_eng/").map(|p| p + "script_eng/".len())
@@ -540,8 +566,8 @@ fn collect(dir: &Path, russian: bool) -> HashMap<String, Vec<PathBuf>> {
 			v.sort_by_key(|p| {
 				let l = p.to_string_lossy().replace('\\', "/").to_lowercase();
 				let backup = l.contains("/data_backup/");
-				let us = l.contains("_us/");
-				let raw = l.ends_with(".bin") || l.ends_with("._dt");
+				let us = l.contains("_us/") || l.contains("monsnote_us.");
+				let raw = l.ends_with(".bin") || l.ends_with("._dt") || l.ends_with(".dt2");
 				((if russian { backup } else { !backup }) as u8, !us as u8, raw as u8)
 			});
 			continue;
@@ -679,7 +705,7 @@ fn read_any(path: &Path) -> Result<Vec<Item>, String> {
 		read_json(path)
 	} else if l.ends_with(".bin") {
 		read_bin(path)
-	} else if l.ends_with("._dt") {
+	} else if l.ends_with("._dt") || l.ends_with(".dt2") {
 		read_dt(path)
 	} else if l.ends_with(".xlsx") {
 		read_xlsx(path)
@@ -849,6 +875,7 @@ fn pair_files(key: &str, ep: &Option<PathBuf>, rp: &Option<PathBuf>, by_id: bool
 				ru_key: r.map(|x| search_key(&x.text)).unwrap_or_default(),
 				en: e.map(|x| side(x, ep)),
 				ru: r.map(|x| side(x, rp)),
+				who: r.or(e).and_then(|x| speaker_of(&x.key)),
 				service,
 			});
 		}
@@ -966,9 +993,10 @@ mod cache {
 				let (file, id) = (r.s()?, r.s()?);
 				let (en, ru) = (r.side()?, r.side()?);
 				let service = r.n()? == 1;
+				let who = u32::try_from(r.n()?).ok();
 				let en_key = en.as_ref().map(|x| search_key(&x.text)).unwrap_or_default();
 				let ru_key = ru.as_ref().map(|x| search_key(&x.text)).unwrap_or_default();
-				pairs.push(Pair { file, id, en, ru, en_key, ru_key, service });
+				pairs.push(Pair { file, id, en, ru, en_key, ru_key, service, who });
 			}
 			let mut warn = Vec::new();
 			for _ in 0..r.n()? {
@@ -997,6 +1025,7 @@ mod cache {
 				w.side(&p.en);
 				w.side(&p.ru);
 				w.n(p.service as u64);
+				w.n(p.who.map_or(u64::MAX, u64::from));
 			}
 			w.n(e.warn.len() as u64);
 			for x in &e.warn {
@@ -1714,7 +1743,7 @@ mod tests {
 		assert_eq!(std::fs::read_dir(&c).unwrap().count(), 1);
 		let b = load_cached(&root.join("en"), &root.join("ru"), &|_, _| {}, Some(&c));
 		assert_eq!(a.pairs.len(), b.pairs.len());
-		assert!(a.pairs.iter().zip(&b.pairs).all(|(x, y)| x.id == y.id && x.file == y.file && x.service == y.service && x.en_key == y.en_key && x.ru_key == y.ru_key
+		assert!(a.pairs.iter().zip(&b.pairs).all(|(x, y)| x.id == y.id && x.file == y.file && x.service == y.service && x.who == y.who && x.en_key == y.en_key && x.ru_key == y.ru_key
 			&& x.en.as_ref().map(|s| (&s.text, s.line)) == y.en.as_ref().map(|s| (&s.text, s.line))
 			&& x.ru.as_ref().map(|s| (&s.text, s.line)) == y.ru.as_ref().map(|s| (&s.text, s.line))));
 		let _ = std::fs::remove_dir_all(&root);

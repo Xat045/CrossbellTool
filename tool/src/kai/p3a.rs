@@ -137,6 +137,60 @@ pub fn verify<'a>(path: &Path, expect: impl IntoIterator<Item = (&'a str, &'a [u
 	Ok(n)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Spooled {
+	offset: u64,
+	cmp_size: u64,
+	unc_size: u64,
+	cmp_hash: u64,
+	unc_hash: u64,
+}
+
+pub struct Spool {
+	path: std::path::PathBuf,
+	file: std::sync::Mutex<(std::fs::File, u64)>,
+}
+
+impl Spool {
+	pub fn create(path: &Path) -> Result<Spool, String> {
+		let f = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+		Ok(Spool { path: path.to_path_buf(), file: std::sync::Mutex::new((f, 0)) })
+	}
+
+	pub fn put(&self, data: &[u8]) -> Result<Spooled, String> {
+		use std::io::Write;
+		let c = lz4_flex::block::compress(data);
+		let cmp_hash = xxh64(&c, 0);
+		let unc_hash = xxh64(data, 0);
+		let mut g = self.file.lock().unwrap();
+		let offset = g.1;
+		g.0.write_all(&c).map_err(|e| format!("{}: {e}", self.path.display()))?;
+		g.1 += c.len() as u64;
+		Ok(Spooled { offset, cmp_size: c.len() as u64, unc_size: data.len() as u64, cmp_hash, unc_hash })
+	}
+}
+
+impl Drop for Spool {
+	fn drop(&mut self) {
+		let _ = std::fs::remove_file(&self.path);
+	}
+}
+
+pub fn verify_spooled<'a>(path: &Path, expect: impl IntoIterator<Item = (&'a str, Spooled)>) -> Result<usize, String> {
+	let a = Archive::open(path)?;
+	let by: std::collections::HashMap<String, &Entry> = a.entries.iter().map(|e| (e.name.to_lowercase().replace('\\', "/"), e)).collect();
+	let mut n = 0;
+	for (name, s) in expect {
+		let e = by.get(&name.to_lowercase().replace('\\', "/")).ok_or_else(|| lformat!("{name}: нет в архиве", "{name}: not in the archive"))?;
+		let d = a.read(e)?;
+		if d.len() as u64 != s.unc_size || xxh64(&d, 0) != s.unc_hash {
+			return Err(lformat!("{name}: в архиве не то, что собиралось", "{name}: the archive holds something other than what was built"));
+		}
+		n += 1;
+	}
+	Ok(n)
+}
+
 pub fn write(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 	let n = files.len();
 	let header_len = (48 + 304 * n).div_ceil(64) * 64;
@@ -182,52 +236,44 @@ pub fn write(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 	out
 }
 
-pub fn rebuild(src: &Archive, replace: &std::collections::HashMap<String, Vec<u8>>, out: &Path) -> Result<(usize, usize), String> {
+pub fn rebuild(src: &Archive, replace: &std::collections::HashMap<String, Spooled>, spool: &Spool, out: &Path) -> Result<(usize, usize), String> {
 	let esize = src.esize;
 	let mut toc = src.toc.clone();
 	let mut names_seen = std::collections::HashSet::new();
-	let mut new_blocks: Vec<Option<Vec<u8>>> = Vec::with_capacity(src.entries.len());
+	let mut new_blocks: Vec<Option<Spooled>> = Vec::with_capacity(src.entries.len());
 	let mut replaced = 0;
+	let set = |raw: &mut [u8], s: &Spooled| {
+		raw[0x100..0x108].copy_from_slice(&1u64.to_le_bytes());
+		raw[0x108..0x110].copy_from_slice(&s.cmp_size.to_le_bytes());
+		raw[0x110..0x118].copy_from_slice(&s.unc_size.to_le_bytes());
+		if esize >= 0x128 {
+			raw[0x120..0x128].copy_from_slice(&s.cmp_hash.to_le_bytes());
+		}
+		if esize >= 0x130 {
+			raw[0x128..0x130].copy_from_slice(&s.unc_hash.to_le_bytes());
+		}
+	};
 	for (i, e) in src.entries.iter().enumerate() {
 		let key = e.name.to_lowercase();
 		names_seen.insert(key.clone());
-		if let Some(data) = replace.get(&key) {
-			let c = lz4_flex::block::compress(data);
-			let raw = &mut toc[i * esize..(i + 1) * esize];
-			raw[0x100..0x108].copy_from_slice(&1u64.to_le_bytes());
-			raw[0x108..0x110].copy_from_slice(&(c.len() as u64).to_le_bytes());
-			raw[0x110..0x118].copy_from_slice(&(data.len() as u64).to_le_bytes());
-			if esize >= 0x128 {
-				raw[0x120..0x128].copy_from_slice(&xxh64(&c, 0).to_le_bytes());
-			}
-			if esize >= 0x130 {
-				raw[0x128..0x130].copy_from_slice(&xxh64(data, 0).to_le_bytes());
-			}
-			new_blocks.push(Some(c));
+		if let Some(s) = replace.get(&key) {
+			set(&mut toc[i * esize..(i + 1) * esize], s);
+			new_blocks.push(Some(*s));
 			replaced += 1;
 		} else {
 			new_blocks.push(None);
 		}
 	}
-	let mut added: Vec<(&String, &Vec<u8>)> = replace.iter().filter(|(k, _)| !names_seen.contains(*k)).collect();
+	let mut added: Vec<(&String, &Spooled)> = replace.iter().filter(|(k, _)| !names_seen.contains(*k)).collect();
 	added.sort_by(|a, b| a.0.cmp(b.0));
-	for (name, data) in &added {
-		let c = lz4_flex::block::compress(data);
+	for (name, s) in &added {
 		let mut raw = vec![0u8; esize];
 		let mut nm = name.as_bytes().to_vec();
 		nm.truncate(0xff);
 		raw[..nm.len()].copy_from_slice(&nm);
-		raw[0x100..0x108].copy_from_slice(&1u64.to_le_bytes());
-		raw[0x108..0x110].copy_from_slice(&(c.len() as u64).to_le_bytes());
-		raw[0x110..0x118].copy_from_slice(&(data.len() as u64).to_le_bytes());
-		if esize >= 0x128 {
-			raw[0x120..0x128].copy_from_slice(&xxh64(&c, 0).to_le_bytes());
-		}
-		if esize >= 0x130 {
-			raw[0x128..0x130].copy_from_slice(&xxh64(data, 0).to_le_bytes());
-		}
+		set(&mut raw, s);
 		toc.extend_from_slice(&raw);
-		new_blocks.push(Some(c));
+		new_blocks.push(Some(**s));
 		replaced += 1;
 	}
 	let n = new_blocks.len();
@@ -247,7 +293,7 @@ pub fn rebuild(src: &Archive, replace: &std::collections::HashMap<String, Vec<u8
 		pos = pos.div_ceil(64) * 64;
 	}
 	let tmp = out.with_extension("p3a.part");
-	let res = write_rebuilt(src, &head, &toc, &new_blocks, &tmp);
+	let res = write_rebuilt(src, &head, &toc, &new_blocks, spool, &tmp);
 	if let Err(e) = res {
 		let _ = std::fs::remove_file(&tmp);
 		return Err(e);
@@ -259,7 +305,7 @@ pub fn rebuild(src: &Archive, replace: &std::collections::HashMap<String, Vec<u8
 	Ok((n, replaced))
 }
 
-fn write_rebuilt(src: &Archive, head: &[u8], toc: &[u8], new_blocks: &[Option<Vec<u8>>], tmp: &Path) -> Result<(), String> {
+fn write_rebuilt(src: &Archive, head: &[u8], toc: &[u8], new_blocks: &[Option<Spooled>], spool: &Spool, tmp: &Path) -> Result<(), String> {
 	use std::io::{Read, Seek, SeekFrom, Write};
 	let esize = src.esize;
 	let n = new_blocks.len();
@@ -277,30 +323,30 @@ fn write_rebuilt(src: &Archive, head: &[u8], toc: &[u8], new_blocks: &[Option<Ve
 		put(&mut w, d, &mut written)?;
 	}
 	let mut f = std::fs::File::open(&src.path).map_err(|e| format!("{}: {e}", src.path.display()))?;
+	let mut sp = std::fs::File::open(&spool.path).map_err(|e| format!("{}: {e}", spool.path.display()))?;
 	let mut buf = vec![0u8; 1 << 20];
 	for i in 0..n {
 		let off = u64::from_le_bytes(toc[i * esize + 0x118..i * esize + 0x120].try_into().unwrap());
 		if off > written {
 			put(&mut w, &vec![0u8; (off - written) as usize], &mut written)?;
 		}
-		match &new_blocks[i] {
-			Some(c) => put(&mut w, c, &mut written)?,
-			None => {
-				let e = &src.entries[i];
-				f.seek(SeekFrom::Start(e.offset)).map_err(|x| format!("{}: {x}", src.path.display()))?;
-				let mut left = e.cmp_size as usize;
-				while left > 0 {
-					let k = left.min(buf.len());
-					f.read_exact(&mut buf[..k]).map_err(|x| format!("{}: {x}", src.path.display()))?;
-					put(&mut w, &buf[..k], &mut written)?;
-					left -= k;
-				}
-			}
+		let (from, from_path, start, size) = match &new_blocks[i] {
+			Some(s) => (&mut sp, &spool.path, s.offset, s.cmp_size),
+			None => (&mut f, &src.path, src.entries[i].offset, src.entries[i].cmp_size),
+		};
+		from.seek(SeekFrom::Start(start)).map_err(|x| format!("{}: {x}", from_path.display()))?;
+		let mut left = size as usize;
+		while left > 0 {
+			let k = left.min(buf.len());
+			from.read_exact(&mut buf[..k]).map_err(|x| format!("{}: {x}", from_path.display()))?;
+			put(&mut w, &buf[..k], &mut written)?;
+			left -= k;
 		}
 	}
 	w.flush().map_err(err)?;
 	drop(w);
 	drop(f);
+	drop(sp);
 	Ok(())
 }
 
@@ -322,15 +368,23 @@ mod tests {
 			assert_eq!(&a.read(e).unwrap(), data);
 			assert_eq!(e.unc_hash, xxh64(data, 0));
 		}
+		let spool_path = d.join("spool.tmp");
+		let spool = Spool::create(&spool_path).unwrap();
+		let other = spool.put(b"other!").unwrap();
 		let mut rep = std::collections::HashMap::new();
-		rep.insert("b.txt".to_string(), b"world!".to_vec());
+		rep.insert("b.txt".to_string(), spool.put(b"world!").unwrap());
+		rep.insert("new.bin".to_string(), spool.put(b"added").unwrap());
 		let out = d.join("r.p3a");
-		assert_eq!(rebuild(&a, &rep, &out).unwrap(), (3, 1));
+		assert_eq!(rebuild(&a, &rep, &spool, &out).unwrap(), (4, 2));
 		let b = Archive::open(&out).unwrap();
 		assert_eq!(b.read(&b.entries[1]).unwrap(), b"world!");
 		assert_eq!(b.read(&b.entries[0]).unwrap(), files[0].1);
+		assert_eq!(b.read(&b.entries[3]).unwrap(), b"added");
 		assert_eq!(verify(&p, files.iter().map(|(n, v)| (n.as_str(), v.as_slice()))).unwrap(), 3);
-		assert_eq!(verify(&out, rep.iter().map(|(n, v)| (n.as_str(), v.as_slice()))).unwrap(), 1);
+		assert_eq!(verify_spooled(&out, rep.iter().map(|(n, v)| (n.as_str(), *v))).unwrap(), 2);
+		assert!(verify_spooled(&out, [("b.txt", other)]).is_err());
+		drop(spool);
+		assert!(!spool_path.exists());
 		assert!(verify(&out, [("b.txt", &b"other!"[..])]).is_err());
 		assert!(verify(&out, [("nope.bin", &b""[..])]).is_err());
 		let mut raw = std::fs::read(&p).unwrap();

@@ -19,11 +19,16 @@ pub struct Disc<'a> {
 	pub d: &'a [u8],
 	items: BTreeMap<usize, Kind>,
 	ptrs: BTreeMap<usize, (u8, usize)>,
+	sizes: BTreeMap<usize, usize>,
 }
 
 impl<'a> Disc<'a> {
 	pub fn new(d: &'a [u8]) -> Self {
-		Disc { d, items: BTreeMap::new(), ptrs: BTreeMap::new() }
+		Disc { d, items: BTreeMap::new(), ptrs: BTreeMap::new(), sizes: BTreeMap::new() }
+	}
+
+	pub fn size32(&mut self, slot: usize, target: usize) {
+		self.sizes.insert(slot, target);
 	}
 
 	pub fn len(&self) -> usize { self.d.len() }
@@ -200,14 +205,28 @@ impl<'a> Disc<'a> {
 				return Err(lformat!("указатель 0x{slot:X} внутри строки", "pointer 0x{slot:X} is inside a string"));
 			};
 			let rel = slot - istart;
-			split_ptr(toks, rel, w, tidx)?;
+			split_tok(toks, rel, Tok::Ptr { w, target: tidx })?;
+		}
+		for (&slot, &target) in &self.sizes {
+			let Some((&istart, _)) = items.range(..=slot).next_back() else {
+				return Err(lformat!("поле размера 0x{slot:X} вне блоков данных", "size field 0x{slot:X} is outside the data blocks"));
+			};
+			let idx = index_of[&istart];
+			let Some(&tidx) = index_of.get(&target) else {
+				return Err(lformat!("поле размера в 0x{slot:X} ведёт в 0x{target:X}, где нет начала элемента", "the size field at 0x{slot:X} leads to 0x{target:X}, where no element starts"));
+			};
+			let Item::Data(toks) = &mut out[idx] else {
+				return Err(lformat!("поле размера 0x{slot:X} внутри строки", "size field 0x{slot:X} is inside a string"));
+			};
+			split_tok(toks, slot - istart, Tok::Size { target: tidx })?;
 		}
 		let _ = item_start;
 		Ok(Doc { items: out })
 	}
 }
 
-fn split_ptr(toks: &mut Vec<Tok>, rel: usize, w: u8, target: usize) -> Res<()> {
+fn split_tok(toks: &mut Vec<Tok>, rel: usize, tok: Tok) -> Res<()> {
+	let w = tok.len();
 	let mut pos = 0;
 	for i in 0..toks.len() {
 		let len = toks[i].len();
@@ -216,14 +235,14 @@ fn split_ptr(toks: &mut Vec<Tok>, rel: usize, w: u8, target: usize) -> Res<()> {
 				return Err(tr("два указателя в одном месте", "two pointers in one place").into());
 			};
 			let off = rel - pos;
-			if off + w as usize > b.len() {
+			if off + w > b.len() {
 				return Err(tr("указатель пересекает границу блока", "the pointer crosses a block boundary").into());
 			}
 			let before = b[..off].to_vec();
-			let after = b[off + w as usize..].to_vec();
+			let after = b[off + w..].to_vec();
 			let mut rep = Vec::new();
 			if !before.is_empty() { rep.push(Tok::Bytes(before)) }
-			rep.push(Tok::Ptr { w, target });
+			rep.push(tok);
 			if !after.is_empty() { rep.push(Tok::Bytes(after)) }
 			toks.splice(i..=i, rep);
 			return Ok(());
@@ -237,6 +256,7 @@ fn split_ptr(toks: &mut Vec<Tok>, rel: usize, w: u8, target: usize) -> Res<()> {
 pub enum Tok {
 	Bytes(Vec<u8>),
 	Ptr { w: u8, target: usize },
+	Size { target: usize },
 }
 
 impl Tok {
@@ -244,6 +264,7 @@ impl Tok {
 		match self {
 			Tok::Bytes(b) => b.len(),
 			Tok::Ptr { w, .. } => *w as usize,
+			Tok::Size { .. } => 4,
 		}
 	}
 }
@@ -292,6 +313,10 @@ impl Doc {
 							Tok::Ptr { target, .. } => {
 								out.extend_from_slice(&(offs[*target] as u32).to_le_bytes());
 							}
+							Tok::Size { target } => {
+								let v = offs[*target] - (out.len() + 4);
+								out.extend_from_slice(&(v as u32).to_le_bytes());
+							}
 						}
 					}
 				}
@@ -324,6 +349,9 @@ impl Doc {
 						}
 						Tok::Ptr { w, target } => {
 							s.push_str(&format!(" p{}:{}", *w as usize * 8, label(*target)));
+						}
+						Tok::Size { target } => {
+							s.push_str(&format!(" l32:{}", label(*target)));
 						}
 					}
 				}
@@ -364,7 +392,7 @@ impl Doc {
 		let lines: Vec<&str> = src.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
 
 		enum Raw { Data(Vec<RawTok>), Str { tail: Vec<u8>, text: Vec<String>, line: usize } }
-		enum RawTok { Bytes(Vec<u8>), Ptr(u8, String, usize) }
+		enum RawTok { Bytes(Vec<u8>), Ptr(u8, String, usize), Size(String, usize) }
 
 		let mut labels: HashMap<String, usize> = HashMap::new();
 		let mut raws: Vec<Raw> = Vec::new();
@@ -385,6 +413,8 @@ impl Doc {
 						toks.push(RawTok::Ptr(2, p.to_string(), lnum));
 					} else if let Some(p) = w.strip_prefix("p32:") {
 						toks.push(RawTok::Ptr(4, p.to_string(), lnum));
+					} else if let Some(p) = w.strip_prefix("l32:") {
+						toks.push(RawTok::Size(p.to_string(), lnum));
 					} else {
 						toks.push(RawTok::Bytes(parse_hex(w).ok_or_else(|| lformat!("строка {lnum}: неверные данные '{w}'", "line {lnum}: invalid data '{w}'"))?));
 					}
@@ -438,6 +468,10 @@ impl Doc {
 							RawTok::Ptr(w, l, lnum) => {
 								let target = *labels.get(&l).ok_or_else(|| lformat!("строка {lnum}: нет метки {l}", "line {lnum}: label {l} is missing"))?;
 								out.push(Tok::Ptr { w, target });
+							}
+							RawTok::Size(l, lnum) => {
+								let target = *labels.get(&l).ok_or_else(|| lformat!("строка {lnum}: нет метки {l}", "line {lnum}: label {l} is missing"))?;
+								out.push(Tok::Size { target });
 							}
 						}
 					}

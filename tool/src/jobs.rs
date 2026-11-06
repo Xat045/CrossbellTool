@@ -23,6 +23,7 @@ pub struct Options {
 	pub scena: bool,
 	pub tables: bool,
 	pub textures: bool,
+	pub other: bool,
 	pub tex_dds: bool,
 	pub check: bool,
 	pub mask: String,
@@ -37,7 +38,11 @@ pub enum Kind {
 	Scena,
 	Table,
 	Texture,
+	Other,
+	Sprite,
 }
+
+const RAW: &str = "raw";
 
 impl Kind {
 	fn label(self) -> &'static str {
@@ -45,6 +50,8 @@ impl Kind {
 			Kind::Scena => tr("диалоги", "dialogues"),
 			Kind::Table => tr("таблицы", "tables"),
 			Kind::Texture => tr("текстуры", "textures"),
+			Kind::Other => tr("прочие файлы (как есть)", "other files (as they are)"),
+			Kind::Sprite => tr("спрайты .itc", ".itc sprites"),
 		}
 	}
 }
@@ -268,6 +275,7 @@ fn kinds_enabled(o: &Options) -> Vec<Kind> {
 	if o.scena { v.push(Kind::Scena) }
 	if o.tables { v.push(Kind::Table) }
 	if o.textures { v.push(Kind::Texture) }
+	if o.other { v.push(Kind::Other); v.push(Kind::Sprite) }
 	v
 }
 
@@ -298,38 +306,9 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 	let mut files = Vec::new();
 	walk(&o.game_dir, &mut files);
 	if let Some(inc) = &o.include {
-		files.retain(|f| top_dir(f, &o.game_dir).map(|t| inc.contains(&t)).unwrap_or(false));
+		files.retain(|f| top_dir(f, &o.game_dir).map(|t| inc.contains(&t)).unwrap_or(o.other));
 	}
-	let mut skipped_jp = std::collections::BTreeSet::new();
-	let mut jp_dirs: std::collections::HashMap<PathBuf, Option<String>> = std::collections::HashMap::new();
-	files.retain(|f| {
-		if o.include.is_some() {
-			return true;
-		}
-		let Ok(rel) = f.strip_prefix(&o.game_dir) else { return true };
-		let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-		let skip = jp_dirs
-			.entry(parent)
-			.or_insert_with_key(|parent| {
-				let mut cur = o.game_dir.clone();
-				for c in parent.components() {
-					let name = c.as_os_str().to_string_lossy().into_owned();
-					if !name.to_lowercase().ends_with("_us") && cur.join(format!("{name}_us")).is_dir() {
-						return Some(rel_key(&cur.join(&name).strip_prefix(&o.game_dir).unwrap_or(Path::new(&name)).to_path_buf()));
-					}
-					cur.push(&name);
-				}
-				None
-			})
-			.clone();
-		match skip {
-			Some(k) => {
-				skipped_jp.insert(k);
-				false
-			}
-			None => true,
-		}
-	});
+	let data_dir = Some(o.game_dir.join("data")).filter(|d| d.is_dir());
 	let mut tasks = Vec::new();
 	let mut unsupported = Vec::new();
 	for f in files {
@@ -340,10 +319,12 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		let stem = stem_of(&name);
 		let kind = if lname.ends_with(".bin") && is_in_scena_dir(rel, &o.game_dir) {
 			Kind::Scena
-		} else if lname.ends_with("._dt") {
+		} else if lname.ends_with("._dt") || lname.ends_with(".dt2") {
 			Kind::Table
 		} else if lname.ends_with(".itp") {
 			Kind::Texture
+		} else if data_dir.as_ref().is_none_or(|d| f.starts_with(d)) {
+			if lname.ends_with(".itc") { Kind::Sprite } else { Kind::Other }
 		} else {
 			continue;
 		};
@@ -352,10 +333,16 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		}
 		if kind == Kind::Table && !dt::is_supported(&stem) {
 			unsupported.push(name);
+			tasks.push(Task { kind: Kind::Other, src: f.clone(), rel: rel.to_path_buf() });
 			continue;
 		}
-		let ext = match kind { Kind::Scena => "json", Kind::Table => "xlsx", Kind::Texture if o.tex_dds => "dds", Kind::Texture => "png" };
-		let out_rel = rel.with_file_name(format!("{stem}.{ext}"));
+		let out_rel = match kind {
+			Kind::Other | Kind::Sprite => rel.to_path_buf(),
+			Kind::Scena => rel.with_file_name(format!("{stem}.json")),
+			Kind::Table => rel.with_file_name(format!("{stem}.xlsx")),
+			Kind::Texture if o.tex_dds => rel.with_file_name(format!("{stem}.dds")),
+			Kind::Texture => rel.with_file_name(format!("{stem}.png")),
+		};
 		tasks.push(Task { kind, src: f.clone(), rel: out_rel });
 	}
 
@@ -371,11 +358,8 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 	for k in &kinds {
 		sink.log(&lformat!("  {}: {} файлов", "  {}: {} files", k.label(), counts(*k)));
 	}
-	if !skipped_jp.is_empty() {
-		sink.log(&lformat!("  японские папки пропущены (есть английские *_us): {}", "  Japanese folders skipped (English *_us ones exist): {}", skipped_jp.into_iter().collect::<Vec<_>>().join(", ")));
-	}
 	if !unsupported.is_empty() {
-		sink.log(&lformat!("  таблицы без поддержки (пропущены): {}", "  unsupported tables (skipped): {}", unsupported.join(", ")));
+		sink.log(&lformat!("  таблицы без поддержки (в проект как есть): {}", "  unsupported tables (copied to the project as is): {}", unsupported.join(", ")));
 	}
 	if tasks.is_empty() {
 		sink.log(tr("Подходящих файлов не найдено. Укажите папку data игры (в ней scena_us, text_us, visual_us…).", "No suitable files found. Choose the game's data folder (it holds scena_us, text_us, visual_us…)."));
@@ -386,12 +370,16 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 	let summary = run_parallel(tasks, sink, |t| {
 		let dst = o.proj_dir.join(&t.rel);
 		let key = rel_key(&t.rel);
-		if dst.exists() && !o.overwrite_edited {
-			let known = manifest.lock().unwrap().map.get(&key).map(|a| a.0);
-			let cur = std::fs::read(&dst).map(|d| fnv(&d)).ok();
-			if known != cur {
-				return Outcome::Skip(Some(tr("уже есть и изменён вами — не перезаписан (чтобы перезаписать, включите «Декомпиляция может перезаписать мои правки»)", "already exists and was edited by you: not overwritten (to overwrite, enable 'Decompile may overwrite my edits')").into()));
+		let edited = |dst: &Path, key: &str| -> Option<Outcome> {
+			if !dst.exists() || o.overwrite_edited {
+				return None;
 			}
+			let known = manifest.lock().unwrap().map.get(key).map(|a| a.0);
+			let cur = std::fs::read(dst).map(|d| fnv(&d)).ok();
+			(known != cur).then(|| Outcome::Skip(Some(tr("уже есть и изменён вами — не перезаписан (чтобы перезаписать, включите «Декомпиляция может перезаписать мои правки»)", "already exists and was edited by you: not overwritten (to overwrite, enable 'Decompile may overwrite my edits')").into())))
+		};
+		if let Some(r) = edited(&dst, &key) {
+			return r;
 		}
 		let data = match std::fs::read(&t.src) {
 			Ok(d) => d,
@@ -400,6 +388,18 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		if let Some(p) = dst.parent() {
 			let _ = std::fs::create_dir_all(p);
 		}
+		let as_is = |warn: Option<String>| -> Outcome {
+			let raw = t.rel.with_file_name(file_name(&t.src));
+			let (dst, key) = (o.proj_dir.join(&raw), rel_key(&raw));
+			if let Some(r) = edited(&dst, &key) {
+				return r;
+			}
+			if let Err(e) = write_atomic(&dst, &data) {
+				return Outcome::Fail(lformat!("не удалось записать: {e}", "could not write: {e}"));
+			}
+			manifest.lock().unwrap().map.insert(key, (fnv(&data), RAW.into()));
+			Outcome::Ok(warn)
+		};
 		let (bytes_written, meta, warn): (Vec<u8>, String, Option<String>) = match t.kind {
 			Kind::Scena => match scena::decompile_json(o.title, &data) {
 				Ok((text, warn)) => {
@@ -416,19 +416,53 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 					}
 					(book, "table".into(), None)
 				}
-				Err(e) => return Outcome::Fail(e),
+				Err(e) => return as_is(Some(lformat!("таблица не разобралась, в проекте как есть: {e}", "couldn't decompile the table, it stays in the project as is: {e}"))),
 			},
 			Kind::Texture => match if o.tex_dds { itp::to_dds(&data) } else { itp::decompile(&data) } {
 				Ok(dec) => {
 					if let Err(e) = write_atomic(&dst, &dec.png) { return Outcome::Fail(e.to_string()) }
-					(dec.png, format!("itp;w={};h={};mips={}", dec.width, dec.height, dec.mips), None)
+					let old = if dec.old { ";old" } else { "" };
+					(dec.png, format!("itp;w={};h={};mips={}{old}", dec.width, dec.height, dec.mips), None)
 				}
 				Err(e) if e.contains(tr("палитр", "palette")) => {
 					PALETTE_SKIPPED.fetch_add(1, Ordering::Relaxed);
-					return Outcome::Skip(None);
+					return as_is(None);
 				}
-				Err(e) => return Outcome::Fail(e),
+				Err(e) => return as_is(Some(lformat!("текстура не разобралась, в проекте как есть: {e}", "couldn't decompile the texture, it stays in the project as is: {e}"))),
 			},
+			Kind::Other => return as_is(None),
+			Kind::Sprite => {
+				let frames = match itp::itc_decode(&data) {
+					Ok(f) => f,
+					Err(e) => return as_is(Some(lformat!("спрайт не разобрался, в проекте как есть: {e}", "couldn't decompile the sprite, it stays in the project as is: {e}"))),
+				};
+				let names: Vec<(PathBuf, String)> = (0..frames.len()).map(|i| { let r = t.rel.join(format!("{i:03}.png")); (o.proj_dir.join(&r), rel_key(&r)) }).collect();
+				for (p, k) in &names {
+					if let Some(r) = edited(p, k) {
+						return r;
+					}
+				}
+				if dst.is_file() && !o.overwrite_edited {
+					let same = manifest.lock().unwrap().map.get(&key).map(|a| a.0) == std::fs::read(&dst).map(|d| fnv(&d)).ok();
+					if !same {
+						return Outcome::Skip(Some(tr("уже есть и изменён вами — не перезаписан (чтобы перезаписать, включите «Декомпиляция может перезаписать мои правки»)", "already exists and was edited by you: not overwritten (to overwrite, enable 'Decompile may overwrite my edits')").into()));
+					}
+				}
+				if dst.is_file() {
+					let _ = std::fs::remove_file(&dst);
+					manifest.lock().unwrap().map.remove(&key);
+				}
+				if let Err(e) = std::fs::create_dir_all(&dst) {
+					return Outcome::Fail(lformat!("не удалось создать папку: {e}", "can't create the folder: {e}"));
+				}
+				for (i, (png, (p, k))) in frames.iter().zip(&names).enumerate() {
+					if let Err(e) = write_atomic(p, png) {
+						return Outcome::Fail(lformat!("не удалось записать: {e}", "could not write: {e}"));
+					}
+					manifest.lock().unwrap().map.insert(k.clone(), (fnv(png), format!("sprite;i={i}")));
+				}
+				return Outcome::Ok(None);
+			}
 		};
 		manifest.lock().unwrap().map.insert(key, (fnv(&bytes_written), meta));
 		Outcome::Ok(warn)
@@ -436,7 +470,7 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 	manifest.into_inner().unwrap().save(&o.proj_dir);
 	let pal = PALETTE_SKIPPED.swap(0, Ordering::Relaxed);
 	if pal > 0 {
-		sink.log(&lformat!("  текстуры старого формата (с палитрой) пропущены: {pal} — это модели, карты и монстры, текста в них нет", "  old-format textures (with a palette) skipped: {pal}. These are models, maps and monsters with no text"));
+		sink.log(&lformat!("  текстуры старого формата (с палитрой) — в проект как есть: {pal}; это модели, карты и монстры, текста в них нет", "  old format textures (with a palette), copied to the project as is: {pal}; these are models, maps and monsters, with no text"));
 	}
 	report(sink, tr("декомпиляция", "decompile"), &summary);
 	summary
@@ -458,6 +492,7 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 	walk(&o.proj_dir, &mut files);
 	let mut tasks = Vec::new();
 	let mut unchanged = 0usize;
+	let mut sprites: BTreeMap<PathBuf, ()> = BTreeMap::new();
 	for f in files {
 		let name = file_name(&f);
 		let lname = name.to_lowercase();
@@ -468,6 +503,23 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 		}
 		if let Some(only) = &o.build_only {
 			if !top_dir(&f, &o.proj_dir).map(|t| only.contains(&t)).unwrap_or(false) {
+				continue;
+			}
+		}
+		if let Some(dir) = rel.parent().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("itc"))) {
+			if mask_match(&o.mask, &stem_of(&file_name(dir))) && manifest.map.get(&rel_key(rel)).is_some_and(|(h, _)| std::fs::read(&f).map(|d| fnv(&d)).ok() != Some(*h)) {
+				sprites.insert(dir.to_path_buf(), ());
+			}
+			continue;
+		}
+		if let Some((h, meta)) = manifest.map.get(&rel_key(rel)) {
+			if meta == RAW {
+				if mask_match(&o.mask, &stem) && std::fs::read(&f).map(|d| fnv(&d)).ok() != Some(*h) {
+					tasks.push(Task { kind: Kind::Other, src: f.clone(), rel: rel.to_path_buf() });
+				}
+				continue;
+			}
+			if meta.ends_with(";old") && std::fs::read(&f).map(|d| fnv(&d)).ok() == Some(*h) {
 				continue;
 			}
 		}
@@ -504,13 +556,18 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 		}
 		let ext = match kind {
 			Kind::Scena => "bin",
+			Kind::Table if stem.to_lowercase().starts_with("monsnote") => "dt2",
 			Kind::Table => "_dt",
 			Kind::Texture => "itp",
+			Kind::Other | Kind::Sprite => continue,
 		};
 		let out_rel = rel.with_file_name(format!("{stem}.{ext}"));
 		tasks.push(Task { kind, src: f.clone(), rel: out_rel });
 	}
 
+	for dir in sprites.into_keys() {
+		tasks.push(Task { kind: Kind::Sprite, src: o.proj_dir.join(&dir), rel: dir });
+	}
 	sink.log(&lformat!("Сборка: {} → {}", "Building: {} → {}", o.proj_dir.display(), o.out_dir.display()));
 	if let Some(only) = &o.build_only {
 		sink.log(&lformat!("  выбрано: {}", "  selected: {}", only.join(", ")));
@@ -589,6 +646,33 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 					Err(e) => return Outcome::Fail(e),
 				}
 			}
+			Kind::Other => match std::fs::read(&t.src) {
+				Ok(d) => (d, None),
+				Err(e) => return Outcome::Fail(lformat!("не удалось прочитать: {e}", "could not read: {e}")),
+			},
+			Kind::Sprite => {
+				let Some(orig) = game_file(o, &t.rel).and_then(|p| std::fs::read(p).ok()) else {
+					return Outcome::Fail(tr("нужен файл игры: укажите папку игры, из него берётся всё, кроме изменённых кадров", "the game file is needed: set the game folder, everything except the changed frames comes from it").into());
+				};
+				let mut edited = Vec::new();
+				for (key, (h, meta)) in manifest.map.range(rel_key(&t.rel) + "/"..) {
+					if !key.starts_with(&(rel_key(&t.rel) + "/")) {
+						break;
+					}
+					let Some(i) = meta_get(meta, "i") else { continue };
+					let png = match std::fs::read(o.proj_dir.join(key)) {
+						Ok(d) => d,
+						Err(e) => return Outcome::Fail(lformat!("не удалось прочитать кадр {key}: {e}", "can't read frame {key}: {e}")),
+					};
+					if fnv(&png) != *h {
+						edited.push((i, png));
+					}
+				}
+				match itp::itc_replace(&orig, &edited) {
+					Ok(d) => (d, None),
+					Err(e) => return Outcome::Fail(e),
+				}
+			}
 		};
 		if let Err(e) = write_atomic(&dst, &data) {
 			return Outcome::Fail(lformat!("не удалось записать {}: {e}", "could not write {}: {e}", dst.display()));
@@ -626,6 +710,7 @@ pub struct Ed7Folder {
 	pub scenes: usize,
 	pub tables: usize,
 	pub textures: usize,
+	pub others: usize,
 	pub size: u64,
 	pub unpacked: u64,
 	pub out_size: u64,
@@ -654,12 +739,12 @@ pub fn scan_game_ed7(data: &Path) -> Vec<Ed7Folder> {
 			let l = file_name(&p).to_lowercase();
 			let (n, k) = if l.ends_with(".bin") && scena {
 				(&mut f.scenes, 4.3)
-			} else if l.ends_with("._dt") {
+			} else if l.ends_with("._dt") || l.ends_with(".dt2") {
 				(&mut f.tables, 1.3)
 			} else if l.ends_with(".itp") {
 				(&mut f.textures, 1.5)
 			} else {
-				continue;
+				(&mut f.others, 1.0)
 			};
 			*n += 1;
 			let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -685,7 +770,10 @@ pub fn scan_project_ed7(proj: &Path) -> Vec<Ed7Folder> {
 				continue;
 			}
 			let l = fname.to_lowercase();
-			let (n, k) = if l.ends_with(".json") {
+			let raw = p.strip_prefix(proj).ok().and_then(|r| manifest.map.get(&rel_key(r))).is_some_and(|a| a.1 == RAW);
+			let (n, k) = if raw {
+				(&mut f.others, 1.0)
+			} else if l.ends_with(".json") {
 				(&mut f.scenes, 4.3)
 			} else if l.ends_with(".xlsx") {
 				(&mut f.tables, 1.3)

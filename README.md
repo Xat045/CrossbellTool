@@ -67,16 +67,17 @@ The game is detected automatically, or you can choose it in the **Game** list. E
 | Content | In the game | For editing | Edit with |
 |---|---|---|---|
 | Dialogues and scripts | `scena_us\*.bin` | `.json` | Notepad++ or any text editor |
-| Tables (items, towns, quests, books) | `text_us\*._dt` | `.xlsx` | Excel or WPS |
+| Tables (items, towns, quests, books), `b_story`, `t_mstqrt`, `monsnote` | `text_us\*._dt`, `story_us\*._dt`, `monsnote\*.dt2` | `.xlsx` | Excel or WPS |
 | Images | `.itp` | `.png`, or `.dds` without re-encoding | Any image editor; for `.dds`, one with DDS support |
+| Sprites | `.itc` | a folder of `.png` frames | Any image editor |
 
 Rules for editing:
 
 - **Dialogues:** translate the strings in `"text"`. `\n` is a new line in the window, and `{wait}` waits for a key press. Keep all other codes in place.
 - **Tables:** edit column B, and don't delete or reorder rows.
-- **Images:** save with transparency and don't change the size.
+- **Images and sprite frames:** save with transparency and don't change the size. Sprite offsets depend on the frame size, so a changed frame is reported as an error.
 
-Old-format textures with a palette (models, maps, monsters) are skipped: they contain no text.
+Old-format textures with a palette (models, maps, monsters) decompile to `.png`; an edited one is built in the newer ITP32 format. All other game files reach the project and stay as they are.
 
 ### Decompiling
 
@@ -131,7 +132,7 @@ Choose a dictionary with the **Choose** button (`.dat`, `.json` or `.txt`, for e
 | Section | What it finds |
 |---|---|
 | **Service codes** | Codes that don't match the original (`{wait}`, `{color N}`, `{0x06}`, `{item[…]}`, `#…F`, `#…V`, `#…P`, `#…W`, `#…I`, `#…M` and others), lost or extra special signs (`♥ ♪ ★ ━ ∴ ※`), a stray `\` in the middle of a line, code fragments |
-| **Not translated** | Scene lines left in English or Japanese; tables and debug scenes are not checked |
+| **Not translated** | Scene lines left untranslated, fully or partly; for a Japanese and English pair, Japanese text left in the English files. Tables and debug scenes are not checked |
 | **Placeholders** | `%d`, `%s` where the count differs from the original |
 
 - Identical errors are grouped, with the files and an example.

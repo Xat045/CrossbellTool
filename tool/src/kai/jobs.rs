@@ -2,12 +2,12 @@
 use crate::{leprintln, lformat, lprintln};
 #[allow(unused_imports)]
 use crate::lang::tr;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::{dds, p3a, scena, tbl};
+use super::{dds, p3a, scena, tbl, tbl_json};
 use crate::jobs::{mask_match, Sink};
 
 pub const MANIFEST: &str = ".kai_manifest.tsv";
@@ -34,6 +34,7 @@ pub struct Options {
 	pub tables: bool,
 	pub textures: bool,
 	pub tex_dds: bool,
+	pub tables_json: bool,
 	pub check: bool,
 	pub other: bool,
 	pub mask: String,
@@ -483,6 +484,7 @@ fn check_translation(tasks: &[(String, String, Kind, PathBuf)], originals: &BTre
 		let Some(raw) = originals.get(vpath).and_then(|p| std::fs::read(p).ok()) else { continue };
 		let en = match k {
 			Kind::Scena => scena::decompile(&raw).ok().map(|(j, _)| j.into_bytes()),
+			_ if pname.to_lowercase().ends_with(".json") => tbl_json::decompile(&raw).ok(),
 			_ => tbl::decompile(&raw, vpath.rsplit('/').next().unwrap_or(vpath)).ok().map(|(b, _, _)| b),
 		};
 		let Some(en) = en else { continue };
@@ -616,6 +618,9 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 			k = Kind::Other;
 		}
 		let mut pname = folder_join(proj_name(v, k));
+		if k == Kind::Table && o.tables_json {
+			pname = pname.strip_suffix(".xlsx").map_or(pname.clone(), |b| format!("{b}.json"));
+		}
 		let dst = o.proj_dir.join(&pname);
 		let sig = src.sig();
 		let check = |pname: &str| -> Option<Outcome> {
@@ -653,6 +658,8 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		}
 		let dst = o.proj_dir.join(&pname);
 		if let Some(p) = dst.parent() { let _ = std::fs::create_dir_all(p); }
+		let first_kind = k;
+		let mut json_warn = None;
 		let (bytes, warn): (Vec<u8>, Option<String>) = match k {
 			Kind::Scena => match scena::decompile(&data) {
 				Ok((json, _)) => {
@@ -661,12 +668,27 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 				}
 				Err(_) if !has_text(&data) => {
 					if let Err(e) = save_orig() { return Outcome::Fail(e) }
-					return Outcome::Skip(None);
+					k = Kind::Other;
+					(Vec::new(), None)
 				}
 				Err(e) => return Outcome::Fail(e),
 			},
+			Kind::Table if o.tables_json => match tbl_json::decompile(&data) {
+				Ok(j) => {
+					if let Err(e) = save_orig() { return Outcome::Fail(e) }
+					(j, None)
+				}
+				Err(e) => {
+					json_warn = Some(lformat!("таблица не разобралась в JSON, в проекте как есть: {e}", "couldn't decompile the table to JSON, it stays in the project as is: {e}"));
+					k = Kind::Other;
+					(Vec::new(), None)
+				}
+			},
 			Kind::Table => match tbl::decompile(&data, &pname) {
-				Ok((_, 0, _)) => return Outcome::Skip(None),
+				Ok((_, 0, _)) => {
+					k = Kind::Other;
+					(Vec::new(), None)
+				}
 				Ok((book, _, _missing)) => {
 					if let Err(e) = save_orig() { return Outcome::Fail(e) }
 					(book, None)
@@ -682,6 +704,18 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 			},
 			Kind::Yaml | Kind::Other => (data.clone(), None),
 		};
+		let (bytes, dst) = if k == Kind::Other && k != first_kind {
+			pname = folder_join(v.clone());
+			if let Some(r) = check(&pname) {
+				return r;
+			}
+			let dst = o.proj_dir.join(&pname);
+			if let Some(p) = dst.parent() { let _ = std::fs::create_dir_all(p); }
+			(data.clone(), dst)
+		} else {
+			(bytes, dst)
+		};
+		let warn = warn.or(json_warn);
 		if let Err(e) = std::fs::write(&dst, &bytes) {
 			let _ = std::fs::remove_file(&dst);
 			return Outcome::Fail(lformat!("не удалось записать: {e}", "could not write: {e}"));
@@ -872,7 +906,47 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 		sink.log(if unchanged > 0 || !load_paths(&o.proj_dir).is_empty() { tr("Нечего собирать — изменённых файлов нет.", "Nothing to build: no changed files.") } else { tr("Нечего собирать — сначала сделайте декомпиляцию в эту папку.", "Nothing to build: decompile into this folder first.") });
 		return Summary::default();
 	}
+	if o.rebuild && !tasks.is_empty() {
+		let _ = std::fs::create_dir_all(&o.out_dir);
+		let arch = load_kv(&o.proj_dir.join(ARCHIVES));
+		let size_of = |label: &String, path: &String| {
+			let p = PathBuf::from(path);
+			let p = if p.is_file() { p } else { o.game_dir.join(format!("{label}.p3a")) };
+			std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+		};
+		let mut used: HashSet<&String> = HashSet::new();
+		let mut edited = 0u64;
+		for (pname, ..) in &tasks {
+			edited += std::fs::metadata(o.proj_dir.join(pname)).map(|m| m.len()).unwrap_or(0);
+			let low = pname.to_lowercase();
+			if let Some(l) = arch.keys().filter(|l| low.starts_with(&format!("{}/", l.to_lowercase()))).max_by_key(|l| l.len()) {
+				used.insert(l);
+			}
+		}
+		let archives: u64 = used.iter().map(|l| size_of(*l, &arch[*l])).sum();
+		let need = rebuild_space(archives, edited);
+		if let Some(free) = free_space(&o.out_dir).filter(|&f| f < need) {
+			sink.log(&lformat!("✖ НЕ ХВАТИТ МЕСТА: для сборки нужно примерно {:.1} ГБ (временный файл и новые архивы), а на диске папки для собранного свободно {:.1} ГБ. Сборка не начиналась — освободите место или выберите другую папку.", "✖ NOT ENOUGH SPACE: the build needs about {:.1} GB (a temporary file and the new archives), but the disk of the output folder has {:.1} GB free. The build did not start. Free some space or choose another folder.",
+				need as f64 / 1073741824.0,
+				free as f64 / 1073741824.0
+			));
+			return Summary { failed: 1, ..Summary::default() };
+		}
+	}
 	let results: Mutex<HashMap<String, Vec<u8>>> = Mutex::new(HashMap::new());
+	let spool = if o.rebuild && !tasks.is_empty() {
+		let _ = std::fs::create_dir_all(&o.out_dir);
+		match p3a::Spool::create(&o.out_dir.join(".build_spool.tmp")) {
+			Ok(sp) => Some(sp),
+			Err(e) => {
+				sink.log(&lformat!("✖ не удалось создать временный файл сборки: {e}", "✖ can't create the temporary build file: {e}"));
+				return Summary { failed: 1, ..Summary::default() };
+			}
+		}
+	} else {
+		None
+	};
+	let spooled: Mutex<HashMap<String, p3a::Spooled>> = Mutex::new(HashMap::new());
 	let yaml_out: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
 	let mut s = run_parallel(&tasks, |t| t.0.clone(), sink, |(_pname, vpath, k, f)| {
 		let data = match std::fs::read(f) { Ok(d) => d, Err(e) => return Outcome::Fail(lformat!("не удалось прочитать (закройте файл в других программах): {e}", "could not read (close the file in other programs): {e}")) };
@@ -884,7 +958,8 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 			}
 			Kind::Table => {
 				let or = match orig() { Ok(x) => x, Err(e) => return Outcome::Fail(e) };
-				match tbl::compile_checked(&data, &or) {
+				let built = if _pname.to_lowercase().ends_with(".json") { tbl_json::compile(&data, &or).map(|b| (b, Vec::new())) } else { tbl::compile_checked(&data, &or) };
+				match built {
 					Ok((b, sk)) if sk.is_empty() => (b, None),
 					Ok((b, sk)) => (b, Some(lformat!("служебные поля (имена файлов/моделей) переводить нельзя — оставлены как в оригинале: {}", "service fields (file and model names) must not be translated, left as in the original: {}", sk.join("; ")))),
 					Err(e) => return Outcome::Fail(e),
@@ -900,7 +975,16 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 			}
 			Kind::Other => (data, None),
 		};
-		results.lock().unwrap().insert(vpath.clone(), bytes);
+		if let Some(sp) = &spool {
+			match sp.put(&bytes) {
+				Ok(x) => {
+					spooled.lock().unwrap().insert(vpath.clone(), x);
+				}
+				Err(e) => return Outcome::Fail(lformat!("не удалось записать временный файл сборки (хватает ли места на диске?): {e}", "can't write the temporary build file (is there enough disk space?): {e}")),
+			}
+		} else {
+			results.lock().unwrap().insert(vpath.clone(), bytes);
+		}
 		Outcome::Ok(warn)
 	});
 	if sink.cancelled() {
@@ -913,9 +997,10 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 	let mut built = results.into_inner().unwrap();
 	if o.rebuild {
 		let arch = load_kv(&o.proj_dir.join(ARCHIVES));
-		let mut by_label: BTreeMap<String, HashMap<String, Vec<u8>>> = BTreeMap::new();
+		let mut ready = spooled.into_inner().unwrap();
+		let mut by_label: BTreeMap<String, HashMap<String, p3a::Spooled>> = BTreeMap::new();
 		for (pname, vpath, k, _) in &tasks {
-			let Some(b) = built.remove(vpath) else { continue };
+			let Some(b) = ready.remove(vpath) else { continue };
 			let tail = proj_name(vpath, *k);
 			let label = pname.strip_suffix(tail.as_str()).map(|x| x.trim_end_matches('/').to_string()).unwrap_or_default();
 			let label = if label.is_empty() {
@@ -959,10 +1044,11 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 			}
 			let _ = std::fs::create_dir_all(dst.parent().unwrap());
 			sink.log(&lformat!("  собираю {label}.p3a …", "  building {label}.p3a …"));
-			match p3a::rebuild(&a, replace, &dst) {
+			let Some(sp) = &spool else { continue };
+			match p3a::rebuild(&a, replace, sp, &dst) {
 				Ok((n, r)) => {
 					sink.log(&lformat!("Архив: {} — файлов {n}, заменено {r}", "Archive: {}, {n} files, {r} replaced", dst.display()));
-					match p3a::verify(&dst, replace.iter().map(|(k, v)| (k.as_str(), v.as_slice()))) {
+					match p3a::verify_spooled(&dst, replace.iter().map(|(k, v)| (k.as_str(), *v))) {
 						Ok(c) => sink.log(&lformat!("  проверено: архив читается, заменённые файлы ({c}) на месте", "  verified: the archive reads, replaced files ({c}) are in place")),
 						Err(e) => {
 							s.failed += 1;
@@ -1177,6 +1263,11 @@ pub fn plan(o: &Options) -> (usize, u64) {
 		}
 	}
 	(n, size)
+}
+
+pub fn rebuild_space(archives: u64, edited: u64) -> u64 {
+	let need = archives + edited.min(archives);
+	need + (need >> 5)
 }
 
 pub fn free_space(path: &Path) -> Option<u64> {

@@ -28,7 +28,10 @@ pub fn find(stem: &str) -> Option<Format> {
 		"t_cook" => ("cook", cook_any),
 		"t_shop" => ("shop", shop),
 		"t_mgame" => ("mgame", mgame),
+		"t_mstqrt" => ("mstqrt", mstqrt),
+		"monsnote" | "monsnote_us" => ("monsnote", monsnote),
 		_ if s.len() == 8 && s.starts_with("t_book") && s[6..].bytes().all(|c| c.is_ascii_digit()) => ("book", str_table),
+		_ if s.len() > 7 && s.starts_with("b_story") && s[7..].bytes().all(|c| c.is_ascii_digit()) => ("story", story),
 		_ => return None,
 	};
 	Some(Format { name: f.0, rule: f.1 })
@@ -40,6 +43,59 @@ fn span(a: usize, b: usize) -> Res<usize> {
 
 fn str_table(d: &mut Disc) -> Res<()> {
 	for t in d.ptr_table(0, usize::MAX)? {
+		d.string(t)?;
+	}
+	Ok(())
+}
+
+fn story(d: &mut Disc) -> Res<()> {
+	let mut ts = d.ptr_table(0, usize::MAX)?;
+	ts.sort();
+	ts.dedup();
+	let mut rest = &ts[..];
+	if let [a, b, ..] = ts[..] {
+		if !d.bytes(a, b)?.contains(&0) {
+			d.data(a, b - a)?;
+			rest = &ts[1..];
+		}
+	}
+	for &t in rest {
+		d.string(t)?;
+	}
+	Ok(())
+}
+
+fn monsnote(d: &mut Disc) -> Res<()> {
+	let texty = |b: &[u8]| !b.is_empty() && b.iter().all(|&c| c >= 0x20 || c == b'\n');
+	let mut o = 0;
+	loop {
+		if d.u32(o)? == 0xFFFF_FFFF {
+			d.data(o, d.len() - o)?;
+			return Ok(());
+		}
+		let end = o + 8 + d.u32(o + 4)?;
+		let rec = d.bytes(o, end)?;
+		let last_nul = |upto: usize| rec[..upto].iter().rposition(|&c| c == 0);
+		let desc = rec.len().checked_sub(1).filter(|&l| rec[l] == 0).and_then(last_nul);
+		let name = desc.and_then(last_nul);
+		match (name, desc) {
+			(Some(n), Some(t)) if texty(&rec[n + 1..t]) && texty(&rec[t + 1..rec.len() - 1]) => {
+				d.data(o, n + 1)?;
+				d.string(o + n + 1)?;
+				d.string(o + t + 1)?;
+			}
+			_ => {
+				d.data(o, end - o)?;
+			}
+		}
+		d.size32(o + 4, end);
+		o = end;
+	}
+}
+
+fn mstqrt(d: &mut Disc) -> Res<()> {
+	d.data(0, 110 * 20)?;
+	for t in d.ptr_table(110 * 20, usize::MAX)? {
 		d.string(t)?;
 	}
 	Ok(())

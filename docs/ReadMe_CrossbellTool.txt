@@ -1,4 +1,4 @@
-CrossbellTool 0.1: decompiles and builds the files of Trails from Zero and Trails to Azure (PC)
+CrossbellTool 0.2: decompiles and builds the files of Trails from Zero and Trails to Azure (PC)
   The Legend of Heroes: Trails from Zero   (zero.exe)
   The Legend of Heroes: Trails to Azure    (ao.exe)
 
@@ -36,13 +36,16 @@ WHAT IT DOES
   Disk space is checked before decompiling, and the program warns you if it's short.
   'File mask' limits the work to specific files: c0100, t_town, c01. (comma-separated; empty means all).
   Files you have already edited are not overwritten when you decompile again.
-  Old-format textures (with a palette: models, maps, monsters) are skipped: they have no text.
+  All game files reach the project. Files the program can't decompile stay as they are and are not built without edits.
 
   In the project folder you will find:
     scena_us\..json   dialogues: translate the strings in "text"
                       (\n is a new line in the window, {wait} waits for a key press; for codes, see 'Service codes' in the CrossbellCompare guide);
     text_us\..xlsx    tables (items, towns, quests, books): edit column B;
-    ..png             images (save with transparency, don't change the size);
+                      b_story and t_mstqrt (Azure) and the monsnote .dt2 monster notes decompile the same way;
+    ..png             images (save with transparency, don't change the size), including old-format textures with
+                      a palette: an edited one is built in the newer ITP32 format;
+    name.itc\NNN.png  frames of an .itc sprite. Don't change a frame's size: offsets depend on it, and the build reports an error;
     ..dds             images, if the .dds format was chosen when decompiling: the same BC7 blocks as in .itp, without
                       re-encoding; when building they move into .itp as they are (those saved in another
                       DDS format are recompressed, like .png). Edit them in an editor with DDS support.

@@ -10,6 +10,7 @@ pub const SHEET: &str = "Text";
 pub const LEGACY_SHEET: &str = "\u{0422}\u{0435}\u{043a}\u{0441}\u{0442}";
 const INFO_SHEET: &str = "_internal";
 const MAGIC: &str = "kiseki-tool kai tbl 1";
+const NAME_TABLE: &str = "NameTableData";
 
 static SCHEMAS: &str = include_str!("tbl_schemas.json");
 
@@ -59,6 +60,20 @@ fn with_schemas<R>(f: impl FnOnce(&Value) -> R) -> R {
 	DB.with(f)
 }
 
+pub fn text_field_names(name: &str) -> Vec<String> {
+	with_schemas(|db| {
+		let mut out = Vec::new();
+		for s in db.get(name).and_then(|v| v.as_array()).into_iter().flatten() {
+			for t in s["text"].as_array().into_iter().flatten() {
+				if let Some(n) = t[1].as_str() {
+					out.push(n.to_string());
+				}
+			}
+		}
+		out
+	})
+}
+
 fn text_fields(name: &str, len: usize) -> Option<Vec<(usize, String)>> {
 	with_schemas(|db| {
 		let list = db.get(name)?.as_array()?;
@@ -76,7 +91,7 @@ fn text_fields(name: &str, len: usize) -> Option<Vec<(usize, String)>> {
 	})
 }
 
-fn known_text_section(name: &str) -> bool {
+pub(super) fn known_text_section(name: &str) -> bool {
 	with_schemas(|db| {
 		db.get(name).and_then(|l| l.as_array()).map(|l| l.iter().any(|s| s["text"].as_array().map(|t| !t.is_empty()).unwrap_or(false))).unwrap_or(false)
 	})
@@ -132,7 +147,7 @@ fn read_cstr(d: &[u8], p: usize) -> Option<&str> {
 	Some(s)
 }
 
-fn identifier(s: &str) -> bool {
+pub(super) fn identifier(s: &str) -> bool {
 	s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-')
 		&& (s.contains('_') || (s.bytes().any(|c| c.is_ascii_lowercase()) && s.bytes().any(|c| c.is_ascii_digit())))
 }
@@ -174,14 +189,14 @@ pub fn rows(d: &[u8]) -> Result<(Vec<Row>, Vec<String>), String> {
 	Ok((out, missing))
 }
 
-fn field_key(id: &str) -> String {
+pub(super) fn field_key(id: &str) -> String {
 	match (id.find('#'), id.rfind('.')) {
 		(Some(h), Some(d)) if d > h => format!("{}.{}", &id[..h], &id[d + 1..]),
 		_ => id.to_string(),
 	}
 }
 
-fn technical_set(rows: &[(String, String)]) -> std::collections::HashSet<String> {
+pub(super) fn technical_set(rows: &[(String, String)]) -> std::collections::HashSet<String> {
 	let mut by: HashMap<String, (usize, usize)> = HashMap::new();
 	for (id, text) in rows {
 		let k = field_key(id);
@@ -215,7 +230,7 @@ fn technical_fields(rows: &[Row]) -> std::collections::HashSet<String> {
 
 pub fn decompile(d: &[u8], file_name: &str) -> Result<(Vec<u8>, usize, Vec<String>), String> {
 	let (rows, missing) = rows(d)?;
-	let book = write_book(&rows, file_name)?;
+	let book = write_book(&rows, file_name, &name_table_info(d))?;
 	let back = compile(&book, d)?;
 	if back != d {
 		return Err(tr("внутренняя ошибка: без правок таблица собирается иначе", "internal error: without edits the table builds differently").into());
@@ -223,7 +238,19 @@ pub fn decompile(d: &[u8], file_name: &str) -> Result<(Vec<u8>, usize, Vec<Strin
 	Ok((book, rows.len(), missing))
 }
 
-fn write_book(rows: &[Row], file_name: &str) -> Result<Vec<u8>, String> {
+fn name_table_info(d: &[u8]) -> HashMap<usize, (u64, String)> {
+	let mut out = HashMap::new();
+	let Ok(hs) = headers(d) else { return out };
+	let Some(h) = hs.iter().find(|h| h.name == NAME_TABLE && h.len >= 24) else { return out };
+	for n in 0..h.count {
+		let at = h.start + n * h.len;
+		let (Ok(id), Ok(p)) = (u64at(d, at), u64at(d, at + 16)) else { break };
+		out.insert(n, (id, read_cstr(d, p as usize).unwrap_or("").to_string()));
+	}
+	out
+}
+
+fn write_book(rows: &[Row], file_name: &str, names: &HashMap<usize, (u64, String)>) -> Result<Vec<u8>, String> {
 	let e = |x: rust_xlsxwriter::XlsxError| lformat!("ошибка создания Excel: {x}", "Excel creation error: {x}");
 	let mut wb = Workbook::new();
 	let head = Format::new().set_bold().set_background_color(Color::RGB(0xDDEBF7));
@@ -241,12 +268,23 @@ fn write_book(rows: &[Row], file_name: &str) -> Result<Vec<u8>, String> {
 		ws.set_column_width(2, 60).map_err(e)?;
 		ws.set_column_hidden(3).map_err(e)?;
 		ws.set_freeze_panes(1, 0).map_err(e)?;
+		if !names.is_empty() {
+			ws.write_string_with_format(0, 4, tr("ID персонажа (для справки)", "Character ID (for reference)"), &head).map_err(e)?;
+			ws.write_string_with_format(0, 5, tr("Модель (для справки)", "Model (for reference)"), &head).map_err(e)?;
+			ws.set_column_width(4, 27).map_err(e)?;
+			ws.set_column_width(5, 23).map_err(e)?;
+		}
 		for (i, r) in rows.iter().enumerate() {
 			let n = i as u32 + 1;
 			ws.write_string_with_format(n, 0, &r.id, &grey).map_err(e)?;
 			ws.write_string_with_format(n, 1, &r.text, &wrap).map_err(e)?;
 			ws.write_string_with_format(n, 2, &r.text, &grey).map_err(e)?;
 			ws.write_string(n, 3, &r.ptr_pos.to_string()).map_err(e)?;
+			let rec = r.id.strip_prefix(NAME_TABLE).and_then(|x| x.strip_prefix('#')).and_then(|x| x.split('.').next()).and_then(|x| x.parse::<usize>().ok());
+			if let Some((id, model)) = rec.and_then(|x| names.get(&x)) {
+				ws.write_number_with_format(n, 4, *id as f64, &grey).map_err(e)?;
+				ws.write_string_with_format(n, 5, model, &grey).map_err(e)?;
+			}
 		}
 	}
 	{

@@ -790,6 +790,9 @@ impl App {
 		if compare::ed7().is_some() {
 			return pair.ru.as_ref().and_then(|s| face_code(&s.text)).or_else(|| pair.en.as_ref().and_then(|s| face_code(&s.text)));
 		}
+		if let Some(id) = pair.who {
+			return compare::speaker_face(Self::face_pack().split('/').next()?, id);
+		}
 		if !pair.file.ends_with("t_active_voice.xlsx") {
 			return None;
 		}
@@ -1892,7 +1895,8 @@ impl App {
 			let line = pr.ru.as_ref().map(|s| s.line).unwrap_or(0);
 			let kind = kind_of(&pr.file);
 			if f.cat == checks::CAT_UNTR {
-				let t = en.trim().to_string();
+				let shown = if f.what.is_empty() { &en } else { &ru };
+				let t = shown.trim().to_string();
 				if let Some(&gi) = groups.get(&format!("{kind}\t{t}")) {
 					let g: &mut Row = &mut out[gi];
 					g.count += 1;
@@ -1904,7 +1908,7 @@ impl App {
 					continue;
 				}
 				groups.insert(format!("{kind}\t{t}"), out.len());
-				out.push(Row { cat: f.cat, pair: f.pair, count: 1, what: String::new(), en: compare::clean(&en, false), ru: compare::clean(&ru, false), file: display_name(pr), files: display_name(pr), line, kind, key: format!("Не переведено\t\t{t}") });
+				out.push(Row { cat: f.cat, pair: f.pair, count: 1, what: String::new(), en: compare::clean(shown, false), ru: compare::clean(&ru, false), file: display_name(pr), files: display_name(pr), line, kind, key: format!("Не переведено\t\t{t}") });
 			} else {
 				out.push(Row { cat: f.cat, pair: f.pair, count: 1, what: f.what.clone(), en: compare::clean(&en, false), ru: compare::clean(&ru, false), file: display_name(pr), files: String::new(), line, kind, key: format!("{}\t{}\t{}", checks::CAT_KEYS[f.cat], pr.file, pr.id) });
 			}

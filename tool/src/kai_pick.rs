@@ -102,6 +102,7 @@ pub struct Picker {
 	pub ed7: bool,
 	pending: Option<Arc<Mutex<Option<Vec<Item>>>>>,
 	pub tex_dds: bool,
+	pub tables_json: bool,
 	page: u8,
 }
 
@@ -278,7 +279,7 @@ fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 	let decomp = mode == Mode::Decompile;
 	let mut out: Vec<Item> = v
 		.into_iter()
-		.filter(|f| f.scenes + f.tables + f.textures > 0)
+		.filter(|f| f.scenes + f.tables + f.textures + f.others > 0)
 		.map(|f| {
 			let text = f.scenes + f.tables > 0;
 			let group = if text { G_TEXT } else { G_TEX };
@@ -302,6 +303,9 @@ fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 			if f.textures > 0 {
 				parts.push(format!("{} {}", plural(f.textures, tr("картинка", "image"), tr("картинки", "images"), tr("картинок", "images")), if decomp { tr(".itp → .png или .dds", ".itp → .png or .dds") } else { ".png / .dds → .itp" }));
 			}
+			if f.others > 0 {
+				parts.push(lformat!("{} как есть", "{} as is", plural(f.others, tr("другой файл", "other file"), tr("других файла", "other files"), tr("других файлов", "other files"))));
+			}
 			let desc = if decomp { lformat!("Найдено: {}", "Found: {}", parts.join(", ")) } else { parts.join(", ") };
 			let (right, ok) = if decomp {
 				(fmt_size(f.size), false)
@@ -318,24 +322,36 @@ fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 }
 
 impl Picker {
+	fn fmt_kinds(&self) -> (bool, bool) {
+		(self.items.iter().any(|i| i.on && i.group == G_TEX), !self.ed7 && self.items.iter().any(|i| i.on && (i.group == G_TEXT || i.group == G_MODS)))
+	}
+
+	fn fmt_title(&self) -> &'static str {
+		match self.fmt_kinds() {
+			(true, true) => tr("Формат файлов", "File format"),
+			(false, true) => tr("Формат таблиц", "Table format"),
+			_ => tr("Формат текстур", "Texture format"),
+		}
+	}
+
 	pub fn open(mode: Mode, dir: &str, then_start: bool, mod_mode: bool, ctx: &egui::Context) -> Picker {
-		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode, ed7: false, pending: None, tex_dds: false, page: 0 };
+		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode, ed7: false, pending: None, tex_dds: false, tables_json: false, page: 0 };
 		p.rescan(ctx);
 		p
 	}
 
 	pub fn with_items(mode: Mode, dir: &str, items: Vec<Item>, then_start: bool, mod_mode: bool) -> Picker {
-		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode, ed7: false, pending: None, tex_dds: false, page: 0 }
+		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode, ed7: false, pending: None, tex_dds: false, tables_json: false, page: 0 }
 	}
 
 	pub fn open_ed7(mode: Mode, dir: &str, then_start: bool, ctx: &egui::Context) -> Picker {
-		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode: false, ed7: true, pending: None, tex_dds: false, page: 0 };
+		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode: false, ed7: true, pending: None, tex_dds: false, tables_json: false, page: 0 };
 		p.rescan(ctx);
 		p
 	}
 
 	pub fn with_items_ed7(mode: Mode, dir: &str, items: Vec<Item>, then_start: bool) -> Picker {
-		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode: false, ed7: true, pending: None, tex_dds: false, page: 0 }
+		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode: false, ed7: true, pending: None, tex_dds: false, tables_json: false, page: 0 }
 	}
 
 	pub fn rescan(&mut self, ctx: &egui::Context) {
@@ -447,7 +463,7 @@ impl Picker {
 			let mut y = rect.min.y + 20.0;
 
 			let fmt_page = decomp && self.page == 1;
-			painter.text(Pos2::new(x0, y + 11.0), Align2::LEFT_CENTER, if fmt_page { tr("Формат текстур", "Texture format") } else if decomp { tr("Что разбирать", "What to decompile") } else { tr("Что собрать", "What to build") }, f_semi(19.0), p.text);
+			painter.text(Pos2::new(x0, y + 11.0), Align2::LEFT_CENTER, if fmt_page { self.fmt_title() } else if decomp { tr("Что разбирать", "What to decompile") } else { tr("Что собрать", "What to build") }, f_semi(19.0), p.text);
 			{
 				let t = if self.scanning() || fmt_page { "" } else { tr("Сканировать заново", "Rescan") };
 				let g = painter.layout_no_wrap(t.to_string(), f_body(13.0), p.accent);
@@ -463,7 +479,11 @@ impl Picker {
 			y += 30.0;
 			let n_all = self.items.len();
 			let headline = if fmt_page {
-				tr("Отмечены текстуры — в каком виде их разобрать для правки?", "Textures are ticked: in which format should they be unpacked for editing?").to_string()
+				match self.fmt_kinds() {
+					(true, true) => tr("Отмечены текстуры и таблицы — в каком виде их разобрать для правки?", "Textures and tables are selected. In which format should they be decompiled for editing?").to_string(),
+					(false, true) => tr("Отмечены таблицы — в каком виде их разобрать для правки?", "Tables are selected. In which format should they be decompiled for editing?").to_string(),
+					_ => tr("Отмечены текстуры — в каком виде их разобрать для правки?", "Textures are ticked: in which format should they be unpacked for editing?").to_string(),
+				}
 			} else if self.scanning() {
 				if decomp { tr("Сканирую папку…", "Scanning the folder…").to_string() } else { tr("Смотрю папку проекта…", "Reading the project folder…").to_string() }
 			} else if decomp {
@@ -526,36 +546,52 @@ impl Picker {
 			lu.set_clip_rect(list);
 			if fmt_page {
 				let ed7 = self.ed7;
-				let opts: [(bool, &str, [&str; 2]); 2] = [
-					(false, tr(".png — обычные картинки", ".png: ordinary images"), [tr("Открываются в любом редакторе: Photoshop, GIMP, Paint.NET, Krita.", "They open in any editor: Photoshop, GIMP, Paint.NET, Krita."), tr("При сборке программа сожмёт их обратно в формат игры.", "When building, the program compresses them back into the game's format.")]),
-					(
-						true,
-						if ed7 { tr(".dds — данные игры без перекодирования", ".dds: game data without re-encoding") } else { tr(".dds — как в игре, без перевода в .png", ".dds: as in the game, no .png conversion") },
-						[
-							if ed7 { tr("Те же сжатые блоки BC7, что в .itp, со всеми уменьшенными копиями — без потерь.", "The same BC7 compressed blocks as in .itp, with all mipmaps: lossless.") } else { tr("Файлы игры копируются как есть — быстрее и без потерь качества.", "Game files are copied as they are: faster and with no quality loss.") },
-							tr("Нужен редактор с поддержкой DDS (Paint.NET, GIMP, плагин для Photoshop).", "You need an editor with DDS support (Paint.NET, GIMP, a Photoshop plugin)."),
-						],
-					),
-				];
-				let mut cy = list.min.y + 16.0;
-				for (i, (dds, title, lines)) in opts.iter().enumerate() {
-					let cr = Rect::from_min_size(Pos2::new(list.min.x + 12.0, cy), Vec2::new(list.width() - 30.0, 92.0));
-					let resp = ui.interact(cr, ui.id().with(("texfmt", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-					let on = self.tex_dds == *dds;
-					painter.rect(cr, 10, if on { p.sel.gamma_multiply(if p.dark { 0.6 } else { 0.55 }) } else if resp.hovered() { p.div2 } else { Color32::TRANSPARENT }, Stroke::new(if on { 1.5 } else { 1.0 }, if on { p.accent } else { p.div }), StrokeKind::Inside);
-					let c = Pos2::new(cr.min.x + 26.0, cr.min.y + 26.0);
-					painter.circle_stroke(c, 9.0, Stroke::new(1.5, if on { p.accent } else { p.muted }));
-					if on {
-						painter.circle_filled(c, 5.0, p.accent);
+				let (has_tex, has_tab) = self.fmt_kinds();
+				let both = has_tex && has_tab;
+				let (card_h, line0, step) = if both { (78.0, 36.0, 18.0) } else { (92.0, 44.0, 20.0) };
+				let mut cy = list.min.y + if both { 6.0 } else { 16.0 };
+				if has_tex {
+					if both {
+						painter.text(Pos2::new(list.min.x + 12.0, cy + 8.0), Align2::LEFT_CENTER, tr("Текстуры", "Textures"), f_semi(13.0), p.muted);
+						cy += 22.0;
 					}
-					painter.text(Pos2::new(cr.min.x + 48.0, c.y), Align2::LEFT_CENTER, *title, f_semi(15.0), p.text);
-					for (j, l) in lines.iter().enumerate() {
-						paint_text_clipped(ui, Rect::from_min_size(Pos2::new(cr.min.x + 48.0, cr.min.y + 44.0 + j as f32 * 20.0), Vec2::new(cr.width() - 60.0, 18.0)), l, f_body(12.5), p.muted, Align2::LEFT_CENTER);
+					let opts: [(bool, &str, [&str; 2]); 2] = [
+						(false, tr(".png — обычные картинки", ".png: ordinary images"), [tr("Открываются в любом редакторе: Photoshop, GIMP, Paint.NET, Krita.", "They open in any editor: Photoshop, GIMP, Paint.NET, Krita."), tr("При сборке программа сожмёт их обратно в формат игры.", "When building, the program compresses them back into the game's format.")]),
+						(
+							true,
+							if ed7 { tr(".dds — данные игры без перекодирования", ".dds: game data without re-encoding") } else { tr(".dds — как в игре, без перевода в .png", ".dds: as in the game, no .png conversion") },
+							[
+								if ed7 { tr("Те же сжатые блоки BC7, что в .itp, со всеми уменьшенными копиями — без потерь.", "The same BC7 compressed blocks as in .itp, with all mipmaps: lossless.") } else { tr("Файлы игры копируются как есть — быстрее и без потерь качества.", "Game files are copied as they are: faster and with no quality loss.") },
+								tr("Нужен редактор с поддержкой DDS (Paint.NET, GIMP, плагин для Photoshop).", "You need an editor with DDS support (Paint.NET, GIMP, a Photoshop plugin)."),
+							],
+						),
+					];
+					for (i, (dds, title, lines)) in opts.iter().enumerate() {
+						if fmt_card(ui, &painter, p, Rect::from_min_size(Pos2::new(list.min.x + 12.0, cy), Vec2::new(list.width() - 30.0, card_h)), ("texfmt", i), self.tex_dds == *dds, title, lines, line0, step) {
+							self.tex_dds = *dds;
+						}
+						cy += card_h + if both { 8.0 } else { 12.0 };
 					}
-					if resp.clicked() {
-						self.tex_dds = *dds;
+				}
+				if has_tab {
+					if both {
+						painter.text(Pos2::new(list.min.x + 12.0, cy + 8.0), Align2::LEFT_CENTER, tr("Таблицы", "Tables"), f_semi(13.0), p.muted);
+						cy += 22.0;
 					}
-					cy += 92.0 + 12.0;
+					let opts: [(bool, &str, [&str; 2]); 2] = [
+						(false, ".xlsx — Excel", [tr("Только текст для перевода, рядом оригинал.", "Only the text to translate, with the original next to it."), tr("Удобно переводить.", "Good for translating.")]),
+						(
+							true,
+							tr(".json — все поля таблицы", ".json: all table fields"),
+							[tr("Текст и числа с названиями полей, как в KuroTools.", "Text and numbers with field names, as in KuroTools."), tr("Удобно менять параметры и модели. Записи добавлять и удалять нельзя.", "Good for changing parameters and models. Records can't be added or removed.")],
+						),
+					];
+					for (i, (js, title, lines)) in opts.iter().enumerate() {
+						if fmt_card(ui, &painter, p, Rect::from_min_size(Pos2::new(list.min.x + 12.0, cy), Vec2::new(list.width() - 30.0, card_h)), ("tabfmt", i), self.tables_json == *js, title, lines, line0, step) {
+							self.tables_json = *js;
+						}
+						cy += card_h + if both { 8.0 } else { 12.0 };
+					}
 				}
 			} else {
 			egui::ScrollArea::vertical().id_salt("pick_list").auto_shrink([false, false]).show(&mut lu, |ui| {
@@ -627,9 +663,17 @@ impl Picker {
 			}
 
 			let n_on = self.n_on();
-			let has_tex = decomp && self.items.iter().any(|i| i.on && i.group == G_TEX);
+			let (has_tex, has_tab) = self.fmt_kinds();
+			let has_fmt = decomp && (has_tex || has_tab);
 			let (summary, hint) = if fmt_page {
-				(lformat!("Текстуры — в {}", "Textures: as {}", if self.tex_dds { ".dds" } else { ".png" }), tr("Выбор запоминается — в следующий раз будет отмечен он же", "The choice is remembered and will be ticked next time").to_string())
+				let tex = lformat!("Текстуры — в {}", "Textures: as {}", if self.tex_dds { ".dds" } else { ".png" });
+				let tab = lformat!("Таблицы — в {}", "Tables to {}", if self.tables_json { ".json" } else { ".xlsx" });
+				let s = match (has_tex, has_tab) {
+					(true, true) => format!("{tex} · {tab}"),
+					(false, true) => tab,
+					_ => tex,
+				};
+				(s, tr("Выбор запоминается — в следующий раз будет отмечен он же", "The choice is remembered and will be ticked next time").to_string())
 			} else if self.scanning() {
 				(tr("Идёт сканирование…", "Scanning…").to_string(), String::new())
 			} else if n_on == 0 {
@@ -660,7 +704,7 @@ impl Picker {
 			painter.text(Pos2::new(x0, foot.center().y - 9.0), Align2::LEFT_CENTER, summary, f_semi(14.0), p.text);
 			painter.text(Pos2::new(x0, foot.center().y + 11.0), Align2::LEFT_CENTER, hint, f_body(12.0), p.muted);
 			let bh = 38.0;
-			let next = has_tex && !fmt_page;
+			let next = has_fmt && !fmt_page;
 			let ok_label = if next { tr("Далее", "Next") } else if decomp { tr("Готово", "Done") } else { tr("Собрать", "Build") };
 			let ok_w = 120.0;
 			let ok_r = Rect::from_min_size(Pos2::new(x1 - ok_w, foot.center().y - bh / 2.0), Vec2::new(ok_w, bh));
@@ -689,6 +733,22 @@ impl Picker {
 		}
 		ev
 	}
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fmt_card(ui: &mut egui::Ui, painter: &egui::Painter, p: &Pal, cr: Rect, id: (&str, usize), on: bool, title: &str, lines: &[&str; 2], line0: f32, step: f32) -> bool {
+	let resp = ui.interact(cr, ui.id().with(id), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+	painter.rect(cr, 10, if on { p.sel.gamma_multiply(if p.dark { 0.6 } else { 0.55 }) } else if resp.hovered() { p.div2 } else { Color32::TRANSPARENT }, Stroke::new(if on { 1.5 } else { 1.0 }, if on { p.accent } else { p.div }), StrokeKind::Inside);
+	let c = Pos2::new(cr.min.x + 26.0, cr.min.y + line0 - 18.0);
+	painter.circle_stroke(c, 9.0, Stroke::new(1.5, if on { p.accent } else { p.muted }));
+	if on {
+		painter.circle_filled(c, 5.0, p.accent);
+	}
+	painter.text(Pos2::new(cr.min.x + 48.0, c.y), Align2::LEFT_CENTER, title, f_semi(15.0), p.text);
+	for (j, l) in lines.iter().enumerate() {
+		paint_text_clipped(ui, Rect::from_min_size(Pos2::new(cr.min.x + 48.0, cr.min.y + line0 + j as f32 * step), Vec2::new(cr.width() - 60.0, 18.0)), l, f_body(12.5), p.muted, Align2::LEFT_CENTER);
+	}
+	resp.clicked()
 }
 
 fn tri_box(ui: &egui::Ui, b: Rect, state: u8, p: &Pal) {

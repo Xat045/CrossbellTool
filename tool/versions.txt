@@ -1,3 +1,3 @@
-CrossbellTool=0.1
-CrossbellCompare=0.1
+CrossbellTool=0.2
+CrossbellCompare=0.2
 suffix=

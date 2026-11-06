@@ -10,18 +10,38 @@ pub struct Decoded {
 	pub width: usize,
 	pub height: usize,
 	pub mips: usize,
+	pub old: bool,
+}
+
+fn to_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
+	let mut png = Vec::new();
+	img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageOutputFormat::Png)
+		.map_err(|e| lformat!("ошибка записи PNG: {e}", "PNG write error: {e}"))?;
+	Ok(png)
+}
+
+fn decompile_old(data: &[u8]) -> Result<Decoded, String> {
+	let itp = std::panic::catch_unwind(|| cradle::itp::read(data))
+		.map_err(|_| tr("старый формат ITP (с палитрой) не читается: файл повреждён", "can't read the old ITP format (with a palette): the file is corrupted").to_string())?
+		.map_err(|e| lformat!("старый формат ITP (с палитрой) не читается: {e}", "can't read the old ITP format (with a palette): {e}"))?;
+	let colors = itp.palette.len();
+	if colors == 0 {
+		return Err(tr("старый формат ITP (с палитрой): палитра лежит в другом файле", "old ITP format (with a palette): the palette is in another file").into());
+	}
+	if itp.image.pixels().any(|p| p.0[0] as usize >= colors) {
+		return Err(tr("старый формат ITP (с палитрой): номер цвета вне палитры", "old ITP format (with a palette): color index outside the palette").into());
+	}
+	let img = itp.to_rgba();
+	Ok(Decoded { png: to_png(&img)?, width: img.width() as usize, height: img.height() as usize, mips: 0, old: true })
 }
 
 pub fn decompile(data: &[u8]) -> Result<Decoded, String> {
 	if !data.starts_with(b"ITP\xFF") {
-		return Err(tr("старый формат ITP (с палитрой) не поддерживается", "the old ITP format (with a palette) is not supported").into());
+		return decompile_old(data);
 	}
 	let itp = itp32::read(data).map_err(|e| lformat!("не удалось прочитать ITP: {e}", "could not read the ITP: {e}"))?;
 	let img = itp.to_rgba(0);
-	let mut png = Vec::new();
-	img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageOutputFormat::Png)
-		.map_err(|e| lformat!("ошибка записи PNG: {e}", "PNG write error: {e}"))?;
-	Ok(Decoded { png, width: itp.width, height: itp.height, mips: itp.levels().saturating_sub(1) })
+	Ok(Decoded { png: to_png(&img)?, width: itp.width, height: itp.height, mips: itp.levels().saturating_sub(1), old: false })
 }
 
 pub fn to_dds(data: &[u8]) -> Result<Decoded, String> {
@@ -57,7 +77,7 @@ pub fn to_dds(data: &[u8]) -> Result<Decoded, String> {
 		u(v);
 	}
 	d.extend(itp.levels.iter().flatten().flat_map(|b| b.to_le_bytes()));
-	Ok(Decoded { png: d, width: itp.width, height: itp.height, mips: itp.levels().saturating_sub(1) })
+	Ok(Decoded { png: d, width: itp.width, height: itp.height, mips: itp.levels().saturating_sub(1), old: false })
 }
 
 pub fn compile_dds(dds: &[u8], mips: usize, expect: Option<(usize, usize)>) -> Result<(Vec<u8>, Option<String>), String> {
@@ -121,4 +141,42 @@ pub fn compile(png: &[u8], mips: usize, expect: Option<(usize, usize)>) -> Resul
 	let itp = Itp32 { width: w, height: h, levels };
 	let data = itp32::write(&itp).map_err(|e| lformat!("ошибка записи ITP: {e}", "ITP write error: {e}"))?;
 	Ok((data, warn))
+}
+
+fn itc_frame(data: &[u8], shared: Option<&[image::Rgba<u8>]>) -> Result<RgbaImage, String> {
+	if data.starts_with(b"ITP\xFF") {
+		let itp = itp32::read(data).map_err(|e| lformat!("не удалось прочитать ITP: {e}", "could not read the ITP: {e}"))?;
+		return Ok(itp.to_rgba(0));
+	}
+	let mut itp = std::panic::catch_unwind(|| cradle::itp::read(data))
+		.map_err(|_| tr("кадр повреждён", "the frame is corrupted").to_string())?
+		.map_err(|e| lformat!("кадр не читается: {e}", "can't read the frame: {e}"))?;
+	if let Some(p) = shared {
+		itp.palette = p.to_vec();
+	}
+	let colors = itp.palette.len();
+	if colors == 0 || itp.image.pixels().any(|p| p.0[0] as usize >= colors) {
+		return Err(tr("номер цвета вне палитры", "color index outside the palette").into());
+	}
+	Ok(itp.to_rgba())
+}
+
+pub fn itc_decode(data: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+	let itc = cradle::itc::read(data).map_err(|e| lformat!("не удалось прочитать ITC: {e}", "can't read the ITC: {e}"))?;
+	itc.content.iter().map(|c| to_png(&itc_frame(c, itc.palette.as_deref())?)).collect()
+}
+
+pub fn itc_replace(orig: &[u8], edited: &[(usize, Vec<u8>)]) -> Result<Vec<u8>, String> {
+	let mut itc = cradle::itc::read(orig).map_err(|e| lformat!("не удалось прочитать ITC игры: {e}", "can't read the game's ITC: {e}"))?;
+	for (i, png) in edited {
+		let Some(old) = itc.content.get(*i) else { return Err(lformat!("в файле игры нет кадра {i}", "the game file has no frame {i}")) };
+		let was = itc_frame(old, itc.palette.as_deref())?;
+		let (data, _) = compile(png, 0, Some((was.width() as usize, was.height() as usize)))?;
+		let now = itp32::read(&data).map_err(|e| lformat!("не удалось прочитать ITP: {e}", "could not read the ITP: {e}"))?;
+		if (now.width as u32, now.height as u32) != (was.width(), was.height()) {
+			return Err(lformat!("кадр {i}: размер изменён, было {}x{}: у спрайта смещения считаются от размера кадра", "frame {i}: the size changed, it was {}x{}: sprite offsets depend on the frame size", was.width(), was.height()));
+		}
+		itc.content[*i] = data.into();
+	}
+	cradle::itc::write(&itc).map_err(|e| lformat!("ошибка записи ITC: {e}", "error writing the ITC: {e}"))
 }
