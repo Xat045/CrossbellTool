@@ -635,15 +635,13 @@ pub enum Dialog<A: Clone> {
 	None,
 	Info(String),
 	Ask(String, A),
-	Choice(String, (String, A), (String, A)),
 }
 
 pub fn show_dialog<A: Clone>(ctx: &egui::Context, p: &Pal, title: &str, d: &mut Dialog<A>) -> Option<A> {
-	let (text, ask, choice) = match d {
+	let (text, ask) = match d {
 		Dialog::None => return None,
-		Dialog::Info(t) => (t.clone(), None, None),
-		Dialog::Ask(t, a) => (t.clone(), Some(a.clone()), None),
-		Dialog::Choice(t, a, b) => (t.clone(), None, Some((a.clone(), b.clone()))),
+		Dialog::Info(t) => (t.clone(), None),
+		Dialog::Ask(t, a) => (t.clone(), Some(a.clone())),
 	};
 	let mut result = None;
 	let mut close = false;
@@ -667,16 +665,7 @@ pub fn show_dialog<A: Clone>(ctx: &egui::Context, p: &Pal, title: &str, d: &mut 
 				ui.label(egui::RichText::new(&text).font(f_body(14.0)).color(p.text));
 				ui.add_space(16.0);
 				ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-					if let Some(((la, a), (lb, b))) = &choice {
-						if primary_button_icon(ui, p, la, Some("check"), Vec2::new(140.0, 34.0), 8, f_semi(15.0), true).clicked() {
-							result = Some(a.clone());
-							close = true;
-						}
-						if small_button(ui, p, lb, None, 34.0, true, p.text).clicked() {
-							result = Some(b.clone());
-							close = true;
-						}
-					} else if ask.is_some() {
+					if ask.is_some() {
 						if primary_button_icon(ui, p, tr("Да", "Yes"), Some("check"), Vec2::new(96.0, 34.0), 8, f_semi(15.0), true).clicked() {
 							result = ask.clone();
 							close = true;
@@ -693,7 +682,7 @@ pub fn show_dialog<A: Clone>(ctx: &egui::Context, p: &Pal, title: &str, d: &mut 
 	if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
 		close = true;
 	}
-	if ask.is_none() && choice.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+	if ask.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
 		close = true;
 	}
 	if close {

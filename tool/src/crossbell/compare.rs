@@ -280,7 +280,7 @@ pub fn set_prefer_jp(right: bool, on: bool) {
 	(if right { &PREFER_JP_RIGHT } else { &PREFER_JP_LEFT }).store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn prefer_jp(right: bool) -> bool {
+pub fn prefer_jp(right: bool) -> bool {
 	(if right { &PREFER_JP_RIGHT } else { &PREFER_JP_LEFT }).load(std::sync::atomic::Ordering::Relaxed)
 }
 

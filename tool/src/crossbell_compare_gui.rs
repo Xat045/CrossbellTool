@@ -193,8 +193,9 @@ pub struct App {
 	menu: Option<(usize, Pos2)>,
 	check_menu: Option<(usize, Pos2)>,
 	flash: Option<(String, Instant)>,
-	dialog: Dialog<(bool, bool)>,
-	lang_answered: bool,
+	dialog: Dialog<()>,
+	col_mixed: [bool; 2],
+	col_lang: [&'static str; 2],
 	scroll_top: bool,
 	fullscreen: bool,
 	page: usize,
@@ -284,7 +285,8 @@ impl App {
 			check_menu: None,
 			flash: None,
 			dialog: Dialog::None,
-			lang_answered: false,
+			col_mixed: [false; 2],
+			col_lang: ["", ""],
 			scroll_top: false,
 			fullscreen: false,
 			page: 0,
@@ -412,26 +414,13 @@ impl App {
 			self.dialog = Dialog::Info(tr("Укажите папку слева, справа или обе (японские, английские или русские файлы); с одной папкой второй столбец будет пустым.\nПодходят папка игры (data), папка русификатора или проекты CrossbellTool (.json, .xlsx).", "Choose the left folder, the right one or both (Japanese, English or Russian files); with one folder the second column stays empty.\nThe game folder (data), a translation patch folder or CrossbellTool projects (.json, .xlsx) will do.").into());
 			return;
 		}
-		if ctx.input(|i| i.modifiers.shift) && !std::mem::take(&mut self.lang_answered) {
-			self.reset_lang(false);
-			self.reset_lang(true);
-		}
 		for right in [false, true] {
 			let (dir, path) = if right { (&ru, self.ru.trim().to_string()) } else { (&en, self.en.trim().to_string()) };
+			let mixed = compare::mixed_languages(dir);
+			self.col_mixed[right as usize] = mixed;
 			let saved = self.settings.get(lang_key(right)).and_then(|v| v.rsplit_once('|')).filter(|(p, _)| p.eq_ignore_ascii_case(&path)).map(|(_, l)| l == "jp");
-			match saved {
-				Some(jp) => compare::set_prefer_jp(right, jp),
-				None if compare::mixed_languages(dir) => {
-					let text = if right {
-						tr("В папке справа есть и японский, и английский текст (например, scena и scena_us). Какой показывать в правой колонке?\nВыбор запомнится, пока папка та же; Shift + «Загрузить» — спросить снова.", "The right folder has both Japanese and English text (for example, scena and scena_us). Which one should the right column show?\nThe choice is kept while the folder stays the same; Shift + Load asks again.")
-					} else {
-						tr("В папке слева есть и японский, и английский текст (например, scena и scena_us). Какой показывать в левой колонке?\nВыбор запомнится, пока папка та же; Shift + «Загрузить» — спросить снова.", "The left folder has both Japanese and English text (for example, scena and scena_us). Which one should the left column show?\nThe choice is kept while the folder stays the same; Shift + Load asks again.")
-					};
-					self.dialog = Dialog::Choice(text.into(), ("Английский".into(), (right, false)), (tr("Японский", "Japanese").into(), (right, true)));
-					return;
-				}
-				None => compare::set_prefer_jp(right, false),
-			}
+			let default_jp = right && self.ru.trim().eq_ignore_ascii_case(self.en.trim());
+			compare::set_prefer_jp(right, mixed && saved.unwrap_or(default_jp));
 		}
 		self.save_settings();
 		let l = Arc::new(Loading::default());
@@ -483,6 +472,7 @@ impl App {
 		self.loading = None;
 		self.search_pending = false;
 		let (d, report) = l.result.lock().unwrap().take().unwrap_or_default();
+		self.col_lang = [side_lang(&d, false), side_lang(&d, true)];
 		self.file_items = vec![tr("(все найденные — через поиск)", "(all found, use search)").to_string()];
 		self.file_items.extend(d.files.iter().map(|(k, (a, b))| format!("{k}   ({})", b - a)));
 		self.file_sel = 0;
@@ -1281,8 +1271,34 @@ impl App {
 		let wen = clamp_safe(rest * self.col_split, 120.0, rest - 120.0);
 		let wru = rest - wen;
 		let xs = [inner.min.x, inner.min.x + wfile, inner.min.x + wfile + wen, inner.max.x];
-		for (i, t) in [tr("Файл", "File"), tr("Яп, Англ, Рус", "JP, EN, RU"), tr("Яп, Англ, Рус", "JP, EN, RU")].iter().enumerate() {
-			ui.painter().galley(Pos2::new(xs[i] + 12.0, inner.min.y + 11.0), ui.fonts(|f| f.layout_job(caps_job(t, p.muted))), p.muted);
+		ui.painter().galley(Pos2::new(xs[0] + 12.0, inner.min.y + 11.0), ui.fonts(|f| f.layout_job(caps_job(tr("Файл", "File"), p.muted))), p.muted);
+		let mut switch = None;
+		for right in [false, true] {
+			let c = right as usize;
+			let x = xs[1 + c] + 12.0;
+			if self.col_mixed[c] && !self.col_lang[c].is_empty() {
+				let cur = compare::prefer_jp(right);
+				for (k, (t, jp)) in [("JP", true), ("EN", false)].into_iter().enumerate() {
+					let r = Rect::from_min_size(Pos2::new(x + k as f32 * 42.0, inner.min.y + 6.0), Vec2::new(38.0, 22.0));
+					let on = cur == jp;
+					let busy = self.loading.is_some();
+					let resp = ui.interact(r, ui.id().with(("collang", c, k)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+					let fill = if on { p.sel } else if resp.hovered() && !busy { p.div2 } else { Color32::TRANSPARENT };
+					ui.painter().rect(r, 6, fill, Stroke::new(1.0, if on { p.accent } else { p.div }), StrokeKind::Inside);
+					ui.painter().text(r.center(), Align2::CENTER_CENTER, t, f_semi(12.0), if on { p.accent } else { p.muted });
+					if resp.clicked() && !on && !busy {
+						switch = Some((right, jp));
+					}
+				}
+			} else {
+				let t = if self.col_lang[c].is_empty() { tr("Яп, Англ, Рус", "JP, EN, RU") } else { self.col_lang[c] };
+				ui.painter().galley(Pos2::new(x, inner.min.y + 11.0), ui.fonts(|f| f.layout_job(caps_job(t, p.muted))), p.muted);
+			}
+		}
+		if let Some((right, jp)) = switch {
+			let path = if right { self.ru.trim() } else { self.en.trim() }.to_string();
+			self.settings.set(lang_key(right), &format!("{path}|{}", if jp { "jp" } else { "en" }));
+			self.start_load(ctx);
 		}
 		let hy = inner.min.y + head_h;
 		ui.painter().line_segment([Pos2::new(inner.min.x, hy), Pos2::new(inner.max.x, hy)], Stroke::new(1.0, p.div));
@@ -1767,15 +1783,34 @@ impl App {
 		if self.btn_open {
 			self.buttons_window(ctx);
 		}
-		if let Some((right, jp)) = show_dialog(ctx, &p, tr("Сверка перевода", "Translation compare"), &mut self.dialog) {
-			let path = if right { self.ru.trim() } else { self.en.trim() }.to_string();
-			self.settings.set(lang_key(right), &format!("{path}|{}", if jp { "jp" } else { "en" }));
-			self.lang_answered = true;
-			self.start_load(ctx);
-		}
+		show_dialog(ctx, &p, tr("Сверка перевода", "Translation compare"), &mut self.dialog);
 		if self.loading.is_some() {
 			ctx.request_repaint_after(std::time::Duration::from_millis(100));
 		}
+	}
+}
+
+fn side_lang(d: &compare::Data, right: bool) -> &'static str {
+	let (mut jp, mut ru, mut en) = (0usize, 0usize, 0usize);
+	for pair in d.pairs.iter().take(4000) {
+		let Some(s) = (if right { &pair.ru } else { &pair.en }) else { continue };
+		for ch in s.text.chars() {
+			match ch {
+				'\u{3040}'..='\u{30ff}' | '\u{4e00}'..='\u{9fff}' => jp += 1,
+				'\u{0400}'..='\u{04ff}' => ru += 1,
+				'a'..='z' | 'A'..='Z' => en += 1,
+				_ => {}
+			}
+		}
+	}
+	if jp == 0 && ru == 0 && en == 0 {
+		""
+	} else if jp >= ru && jp * 4 >= en {
+		tr("Японский", "Japanese")
+	} else if ru >= en / 4 {
+		"Русский"
+	} else {
+		"Английский"
 	}
 }
 
