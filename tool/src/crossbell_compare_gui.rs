@@ -193,7 +193,8 @@ pub struct App {
 	menu: Option<(usize, Pos2)>,
 	check_menu: Option<(usize, Pos2)>,
 	flash: Option<(String, Instant)>,
-	dialog: Dialog<()>,
+	dialog: Dialog<bool>,
+	lang_answered: bool,
 	scroll_top: bool,
 	fullscreen: bool,
 	page: usize,
@@ -283,6 +284,7 @@ impl App {
 			check_menu: None,
 			flash: None,
 			dialog: Dialog::None,
+			lang_answered: false,
 			scroll_top: false,
 			fullscreen: false,
 			page: 0,
@@ -405,6 +407,20 @@ impl App {
 		if !en.is_dir() || !ru.is_dir() {
 			self.dialog = Dialog::Info(tr("Укажите папку слева, справа или обе (японские, английские или русские файлы); с одной папкой второй столбец будет пустым.\nПодходят папка игры (data), папка русификатора или проекты CrossbellTool (.json, .xlsx).", "Choose the left folder, the right one or both (Japanese, English or Russian files); with one folder the second column stays empty.\nThe game folder (data), a translation patch folder or CrossbellTool projects (.json, .xlsx) will do.").into());
 			return;
+		}
+		let lang_key = format!("textlang|{}|{}", self.en.trim().to_lowercase(), self.ru.trim().to_lowercase());
+		let shift = ctx.input(|i| i.modifiers.shift) && !std::mem::take(&mut self.lang_answered);
+		match self.settings.get(&lang_key).filter(|_| !shift) {
+			Some(v) => compare::set_prefer_jp(v == "jp"),
+			None if compare::mixed_languages(&en) || compare::mixed_languages(&ru) => {
+				self.dialog = Dialog::Choice(
+					tr("В папке есть и японский, и английский текст (например, scena и scena_us). Какой показывать?\nВыбор запомнится для этой папки; Shift + «Загрузить» — спросить снова.", "The folder has both Japanese and English text (for example, scena and scena_us). Which one should be shown?\nThe choice is remembered for this folder; Shift + Load asks again.").into(),
+					("Английский".into(), false),
+					(tr("Японский", "Japanese").into(), true),
+				);
+				return;
+			}
+			None => compare::set_prefer_jp(false),
 		}
 		self.save_settings();
 		let l = Arc::new(Loading::default());
@@ -1732,7 +1748,12 @@ impl App {
 		if self.btn_open {
 			self.buttons_window(ctx);
 		}
-		show_dialog(ctx, &p, tr("Сверка перевода", "Translation compare"), &mut self.dialog);
+		if let Some(jp) = show_dialog(ctx, &p, tr("Сверка перевода", "Translation compare"), &mut self.dialog) {
+			let lang_key = format!("textlang|{}|{}", self.en.trim().to_lowercase(), self.ru.trim().to_lowercase());
+			self.settings.set(&lang_key, if jp { "jp" } else { "en" });
+			self.lang_answered = true;
+			self.start_load(ctx);
+		}
 		if self.loading.is_some() {
 			ctx.request_repaint_after(std::time::Duration::from_millis(100));
 		}

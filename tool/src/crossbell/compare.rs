@@ -273,6 +273,35 @@ fn file_key(rel: &str) -> Option<String> {
 	None
 }
 
+static PREFER_JP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_prefer_jp(on: bool) {
+	PREFER_JP.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn prefer_jp() -> bool {
+	PREFER_JP.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn is_us_path(l: &str) -> bool {
+	l.contains("_us/") || l.contains("monsnote_us.")
+}
+
+pub fn mixed_languages(dir: &Path) -> bool {
+	let mut files = Vec::new();
+	walk(dir, &mut files);
+	let (mut jp, mut en) = (std::collections::HashSet::new(), std::collections::HashSet::new());
+	for f in files {
+		let rel = f.strip_prefix(dir).unwrap_or(&f).to_string_lossy().replace('\\', "/").to_lowercase();
+		if rel.contains("data_backup/") {
+			continue;
+		}
+		let Some(k) = file_key(&rel) else { continue };
+		if is_us_path(&rel) { en.insert(k) } else { jp.insert(k) };
+	}
+	jp.iter().any(|k| en.contains(k))
+}
+
 fn collect(dir: &Path, russian: bool) -> HashMap<String, Vec<PathBuf>> {
 	let mut files = Vec::new();
 	walk(dir, &mut files);
@@ -296,9 +325,9 @@ fn collect(dir: &Path, russian: bool) -> HashMap<String, Vec<PathBuf>> {
 			v.sort_by_key(|p| {
 				let l = p.to_string_lossy().replace('\\', "/").to_lowercase();
 				let backup = l.contains("/data_backup/");
-				let us = l.contains("_us/") || l.contains("monsnote_us.");
+				let us = is_us_path(&l);
 				let raw = l.ends_with(".bin") || l.ends_with("._dt") || l.ends_with(".dt2");
-				((if russian { backup } else { !backup }) as u8, !us as u8, raw as u8)
+				((if russian { backup } else { !backup }) as u8, (us == prefer_jp()) as u8, raw as u8)
 			});
 			continue;
 		}
@@ -449,7 +478,7 @@ pub fn load(en_dir: &Path, ru_dir: &Path, progress: &(dyn Fn(usize, usize) + Syn
 }
 
 pub fn load_cached(en_dir: &Path, ru_dir: &Path, progress: &(dyn Fn(usize, usize) + Sync), cache: Option<&Path>) -> Data {
-	let cache_file = cache.map(|d| d.join(format!("{:016x}.bin", fnv64(format!("{}|{}|{}", en_dir.display(), ru_dir.display(), ED7.load(std::sync::atomic::Ordering::Relaxed)).as_bytes()))));
+	let cache_file = cache.map(|d| d.join(format!("{:016x}.bin", fnv64(format!("{}|{}|{}|{}", en_dir.display(), ru_dir.display(), ED7.load(std::sync::atomic::Ordering::Relaxed), if prefer_jp() { "jp" } else { "en" }).as_bytes()))));
 	let old: HashMap<String, cache::Entry> = cache_file.as_deref().and_then(cache::read).unwrap_or_default();
 
 	let en = collect(en_dir, false);

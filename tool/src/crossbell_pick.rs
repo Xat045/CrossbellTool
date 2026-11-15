@@ -393,7 +393,7 @@ impl Picker {
 				let (has_tex, has_tab) = self.fmt_kinds();
 				let gap = 10.0;
 				let cw = (list.width() - 30.0 - gap) / 2.0;
-				let (card_h, line0, step) = (70.0, 36.0, 17.0);
+				let (card_h, line0, step) = (78.0, 36.0, 16.0);
 				let mut cy = list.min.y + 6.0;
 				let row = |ui: &mut egui::Ui, cy: &mut f32, title: &str, id: &str, cur: bool, opts: [(bool, &str, [&str; 2]); 2]| -> Option<bool> {
 					painter.text(Pos2::new(list.min.x + 12.0, *cy + 8.0), Align2::LEFT_CENTER, title, f_semi(13.0), p.muted);
