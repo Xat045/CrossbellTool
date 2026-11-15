@@ -126,6 +126,7 @@ pub struct Picker {
 	pub keep_failed: bool,
 	page: u8,
 	pub sections: bool,
+	pub proj: String,
 }
 
 pub fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
@@ -206,6 +207,37 @@ fn folder_items(v: Vec<crossbell_tool::crossbell::jobs::Ed7Folder>, mode: Mode) 
 }
 
 impl Picker {
+	fn tree_lines(&self) -> Vec<TreeLine> {
+		use crossbell_tool::crossbell::jobs as cj;
+		let proj = std::path::Path::new(self.proj.trim());
+		let root = proj.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| tr("Проект", "Project").to_string());
+		let has = |d: &std::path::Path| !proj.as_os_str().is_empty() && d.is_dir();
+		let note = |d: &std::path::Path| if has(d) { tr("уже есть", "already there").to_string() } else { String::new() };
+		let mut out = vec![TreeLine { depth: 0, name: root, section: false, note: tr("папка проекта", "project folder").to_string() }];
+		let mut names: Vec<String> = self.items.iter().filter(|i| i.on).map(|i| i.key.clone()).collect();
+		names.sort();
+		names.dedup();
+		if self.sections {
+			for (i, sec) in cj::SECTIONS.iter().enumerate() {
+				let here: Vec<&String> = names.iter().filter(|n| cj::section_of(n) == i).collect();
+				if here.is_empty() {
+					continue;
+				}
+				let sd = proj.join(sec);
+				out.push(TreeLine { depth: 1, name: sec.to_string(), section: true, note: note(&sd) });
+				for n in here {
+					out.push(TreeLine { depth: 2, name: n.clone(), section: false, note: note(&sd.join(n)) });
+				}
+			}
+		} else {
+			for n in names {
+				let d = proj.join(&n);
+				out.push(TreeLine { depth: 1, name: n, section: false, note: note(&d) });
+			}
+		}
+		out
+	}
+
 	fn fmt_kinds(&self) -> (bool, bool) {
 		(self.items.iter().any(|i| i.on && i.pics), false)
 	}
@@ -215,13 +247,13 @@ impl Picker {
 	}
 
 	pub fn open(mode: Mode, dir: &str, then_start: bool, ctx: &egui::Context) -> Picker {
-		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode: false, pending: None, tex_dds: false, tables_json: false, other_files: false, keep_failed: true, page: 0, sections: false };
+		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode: false, pending: None, tex_dds: false, tables_json: false, other_files: false, keep_failed: true, page: 0, sections: false, proj: String::new() };
 		p.rescan(ctx);
 		p
 	}
 
 	pub fn with_items(mode: Mode, dir: &str, items: Vec<Item>, then_start: bool) -> Picker {
-		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode: false, pending: None, tex_dds: false, tables_json: false, other_files: false, keep_failed: true, page: 0, sections: false }
+		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode: false, pending: None, tex_dds: false, tables_json: false, other_files: false, keep_failed: true, page: 0, sections: false, proj: String::new() }
 	}
 
 	pub fn rescan(&mut self, ctx: &egui::Context) {
@@ -413,6 +445,9 @@ impl Picker {
 					if let Some(v) = row(ui, &mut cy, tr("Папки проекта", "Project folders"), "structfmt", self.sections, sections) {
 						self.sections = v;
 					}
+					painter.text(Pos2::new(list.min.x + 12.0, cy + 8.0), Align2::LEFT_CENTER, tr("Так будет выглядеть папка проекта", "This is how the project folder will look"), f_semi(13.0), p.muted);
+					let tr = Rect::from_min_max(Pos2::new(list.min.x + 12.0, cy + 22.0), Pos2::new(list.min.x + 12.0 + 2.0 * cw + gap, list.max.y - 10.0));
+					paint_tree(ui, p, tr, &self.tree_lines());
 				} else {
 				if has_tex {
 					let dds = [tr("Те же блоки BC7, что в .itp, без потерь.", "The same BC7 blocks as in .itp, lossless."), tr("Нужен редактор с поддержкой DDS.", "Needs an editor that supports DDS.")];

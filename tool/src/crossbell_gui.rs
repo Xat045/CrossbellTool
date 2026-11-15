@@ -386,6 +386,7 @@ impl App {
 		pk.other_files = self.other_files;
 		pk.keep_failed = self.keep_failed;
 		pk.sections = crossbell_tool::crossbell::jobs::uses_sections(std::path::Path::new(self.proj.trim()));
+		pk.proj = self.proj.clone();
 		self.pick = Some(pk);
 	}
 

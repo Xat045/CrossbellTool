@@ -1006,3 +1006,33 @@ pub fn window_icon() -> egui::IconData {
 	}
 	egui::IconData { rgba, width: n as u32, height: n as u32 }
 }
+
+pub struct TreeLine {
+	pub depth: u8,
+	pub name: String,
+	pub section: bool,
+	pub note: String,
+}
+
+pub fn paint_tree(ui: &Ui, p: &Pal, r: Rect, lines: &[TreeLine]) {
+	let painter = ui.painter();
+	painter.rect(r, 10, Color32::TRANSPARENT, Stroke::new(1.0, p.div), StrokeKind::Inside);
+	let lh = 22.0;
+	let fit = (((r.height() - 16.0) / lh).floor() as usize).max(1);
+	let show = if lines.len() > fit { fit - 1 } else { lines.len() };
+	let clip = painter.with_clip_rect(r.shrink(2.0));
+	let mut y = r.min.y + 8.0;
+	for l in &lines[..show] {
+		let x = r.min.x + 14.0 + l.depth as f32 * 22.0;
+		let cy = y + lh / 2.0;
+		paint_icon(ui, "folder", Rect::from_center_size(Pos2::new(x + 7.0, cy), Vec2::splat(15.0)), if l.section { p.accent } else { p.muted });
+		let g = clip.text(Pos2::new(x + 22.0, cy), Align2::LEFT_CENTER, &l.name, if l.section { f_semi(13.5) } else { f_body(13.5) }, if l.section { p.accent } else { p.text });
+		if !l.note.is_empty() {
+			clip.text(Pos2::new(g.max.x + 10.0, cy), Align2::LEFT_CENTER, &l.note, f_body(12.5), p.muted);
+		}
+		y += lh;
+	}
+	if lines.len() > show {
+		clip.text(Pos2::new(r.min.x + 36.0, y + lh / 2.0), Align2::LEFT_CENTER, lformat!("… и ещё {}", "… and {} more", lines.len() - show), f_body(12.5), p.muted);
+	}
+}
