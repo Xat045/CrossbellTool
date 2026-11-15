@@ -193,7 +193,7 @@ pub struct App {
 	menu: Option<(usize, Pos2)>,
 	check_menu: Option<(usize, Pos2)>,
 	flash: Option<(String, Instant)>,
-	dialog: Dialog<bool>,
+	dialog: Dialog<(bool, bool)>,
 	lang_answered: bool,
 	scroll_top: bool,
 	fullscreen: bool,
@@ -385,6 +385,10 @@ impl App {
 		st.save();
 	}
 
+	fn reset_lang(&mut self, right: bool) {
+		self.settings.set(lang_key(right), "");
+	}
+
 	fn flash(&mut self, s: &str) {
 		self.flash = Some((s.to_string(), Instant::now()));
 	}
@@ -408,19 +412,26 @@ impl App {
 			self.dialog = Dialog::Info(tr("Укажите папку слева, справа или обе (японские, английские или русские файлы); с одной папкой второй столбец будет пустым.\nПодходят папка игры (data), папка русификатора или проекты CrossbellTool (.json, .xlsx).", "Choose the left folder, the right one or both (Japanese, English or Russian files); with one folder the second column stays empty.\nThe game folder (data), a translation patch folder or CrossbellTool projects (.json, .xlsx) will do.").into());
 			return;
 		}
-		let lang_key = format!("textlang|{}|{}", self.en.trim().to_lowercase(), self.ru.trim().to_lowercase());
-		let shift = ctx.input(|i| i.modifiers.shift) && !std::mem::take(&mut self.lang_answered);
-		match self.settings.get(&lang_key).filter(|_| !shift) {
-			Some(v) => compare::set_prefer_jp(v == "jp"),
-			None if compare::mixed_languages(&en) || compare::mixed_languages(&ru) => {
-				self.dialog = Dialog::Choice(
-					tr("В папке есть и японский, и английский текст (например, scena и scena_us). Какой показывать?\nВыбор запомнится для этой папки; Shift + «Загрузить» — спросить снова.", "The folder has both Japanese and English text (for example, scena and scena_us). Which one should be shown?\nThe choice is remembered for this folder; Shift + Load asks again.").into(),
-					("Английский".into(), false),
-					(tr("Японский", "Japanese").into(), true),
-				);
-				return;
+		if ctx.input(|i| i.modifiers.shift) && !std::mem::take(&mut self.lang_answered) {
+			self.reset_lang(false);
+			self.reset_lang(true);
+		}
+		for right in [false, true] {
+			let (dir, path) = if right { (&ru, self.ru.trim().to_string()) } else { (&en, self.en.trim().to_string()) };
+			let saved = self.settings.get(lang_key(right)).and_then(|v| v.rsplit_once('|')).filter(|(p, _)| p.eq_ignore_ascii_case(&path)).map(|(_, l)| l == "jp");
+			match saved {
+				Some(jp) => compare::set_prefer_jp(right, jp),
+				None if compare::mixed_languages(dir) => {
+					let text = if right {
+						tr("В папке справа есть и японский, и английский текст (например, scena и scena_us). Какой показывать в правой колонке?\nВыбор запомнится, пока папка та же; Shift + «Загрузить» — спросить снова.", "The right folder has both Japanese and English text (for example, scena and scena_us). Which one should the right column show?\nThe choice is kept while the folder stays the same; Shift + Load asks again.")
+					} else {
+						tr("В папке слева есть и японский, и английский текст (например, scena и scena_us). Какой показывать в левой колонке?\nВыбор запомнится, пока папка та же; Shift + «Загрузить» — спросить снова.", "The left folder has both Japanese and English text (for example, scena and scena_us). Which one should the left column show?\nThe choice is kept while the folder stays the same; Shift + Load asks again.")
+					};
+					self.dialog = Dialog::Choice(text.into(), ("Английский".into(), (right, false)), (tr("Японский", "Japanese").into(), (right, true)));
+					return;
+				}
+				None => compare::set_prefer_jp(right, false),
 			}
-			None => compare::set_prefer_jp(false),
 		}
 		self.save_settings();
 		let l = Arc::new(Loading::default());
@@ -864,12 +875,16 @@ impl App {
 		if dropped.len() >= 2 {
 			self.en = dropped[0].display().to_string();
 			self.ru = dropped[1].display().to_string();
+			self.reset_lang(false);
+			self.reset_lang(true);
 			self.flash(tr("Указаны обе папки — нажмите «Загрузить»", "Both folders are set: click 'Load'"));
 		} else if pos.map(|pp| pp.x >= self.drop_split).unwrap_or(!self.en.trim().is_empty()) {
 			self.ru = dropped[0].display().to_string();
+			self.reset_lang(true);
 			self.flash(tr("Правая папка указана", "Right folder set"));
 		} else {
 			self.en = dropped[0].display().to_string();
+			self.reset_lang(false);
 			self.flash(tr("Левая папка указана", "Left folder set"));
 		}
 		self.save_settings();
@@ -930,9 +945,11 @@ impl App {
 			if cl
 				&& let Some(d) = pick_folder(&self.en) {
 					self.en = d.display().to_string();
+					self.reset_lang(false);
 					self.save_settings();
 				}
 			if ch {
+				self.reset_lang(false);
 				self.save_settings();
 			}
 		}
@@ -945,9 +962,11 @@ impl App {
 			if cl
 				&& let Some(d) = pick_folder(&self.ru) {
 					self.ru = d.display().to_string();
+					self.reset_lang(true);
 					self.save_settings();
 				}
 			if ch {
+				self.reset_lang(true);
 				self.save_settings();
 			}
 		}
@@ -1748,9 +1767,9 @@ impl App {
 		if self.btn_open {
 			self.buttons_window(ctx);
 		}
-		if let Some(jp) = show_dialog(ctx, &p, tr("Сверка перевода", "Translation compare"), &mut self.dialog) {
-			let lang_key = format!("textlang|{}|{}", self.en.trim().to_lowercase(), self.ru.trim().to_lowercase());
-			self.settings.set(&lang_key, if jp { "jp" } else { "en" });
+		if let Some((right, jp)) = show_dialog(ctx, &p, tr("Сверка перевода", "Translation compare"), &mut self.dialog) {
+			let path = if right { self.ru.trim() } else { self.en.trim() }.to_string();
+			self.settings.set(lang_key(right), &format!("{path}|{}", if jp { "jp" } else { "en" }));
 			self.lang_answered = true;
 			self.start_load(ctx);
 		}
