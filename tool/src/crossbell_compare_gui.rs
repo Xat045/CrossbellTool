@@ -1991,7 +1991,7 @@ impl App {
 				}
 				let tx = fr.max.x + 8.0;
 				let tw = row.max.x - tx - 4.0;
-				paint_text_clipped(ui, Rect::from_min_size(Pos2::new(tx + 4.0, row.min.y + 13.0), Vec2::new(tw - 4.0, 22.0)), &r.name, f_body(17.0), p.text, Align2::LEFT_TOP);
+				paint_text_clipped(ui, Rect::from_min_size(Pos2::new(tx + 4.0, row.min.y + 13.0), Vec2::new(tw - 4.0, 27.0)), &r.name, f_body(17.0), p.text, Align2::LEFT_TOP);
 				paint_text_clipped(ui, Rect::from_min_size(Pos2::new(tx + 4.0, row.min.y + 38.0), Vec2::new(tw - 4.0, 18.0)), &plural(r.lines, tr("реплика", "line"), tr("реплики", "lines"), tr("реплик", "lines")), f_body(14.0), p.muted, Align2::LEFT_TOP);
 				if resp.clicked() {
 					pick = Some(r.id);
