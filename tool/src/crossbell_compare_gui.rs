@@ -510,13 +510,18 @@ impl App {
 				self.file_sel = n + 1;
 				self.show_file();
 			}
-		if let (Some((sel, f, id)), Some(d)) = (self.restore_row.take(), self.data.as_ref())
-			&& let Some(i) = self.rows.iter().position(|&k| d.pairs[k].file == f && d.pairs[k].id == id) {
-				self.scroll_to = Some(i);
-				if sel {
-					self.selected = Some(i);
-				}
+		self.apply_restore_row();
+	}
+
+	fn apply_restore_row(&mut self) {
+		let (Some((sel, f, id)), Some(d)) = (self.restore_row.as_ref(), self.data.as_ref()) else { return };
+		if let Some(i) = self.rows.iter().position(|&k| d.pairs[k].file == *f && d.pairs[k].id == *id) {
+			self.scroll_to = Some(i);
+			if *sel {
+				self.selected = Some(i);
 			}
+			self.restore_row = None;
+		}
 	}
 
 	fn load_dict(&mut self, path: &std::path::Path, force: bool) {
@@ -1296,6 +1301,16 @@ impl App {
 			}
 		}
 		if let Some((right, jp)) = switch {
+			if let Some(d) = self.data.as_ref() {
+				if self.file_sel > 0 {
+					self.restore_file = d.files.keys().nth(self.file_sel - 1).cloned();
+				}
+				let row = self.selected.map(|i| (true, i)).or_else(|| (!self.rows.is_empty()).then_some((false, self.top_row)));
+				if let Some((sel, i)) = row
+					&& let Some(&k) = self.rows.get(i) {
+						self.restore_row = Some((sel, d.pairs[k].file.clone(), d.pairs[k].id.clone()));
+					}
+			}
 			let path = if right { self.ru.trim() } else { self.en.trim() }.to_string();
 			self.settings.set(lang_key(right), &format!("{path}|{}", if jp { "jp" } else { "en" }));
 			self.start_load(ctx);
@@ -1956,7 +1971,13 @@ impl App {
 		list.sort_by(|a, b| b.lines.cmp(&a.lines).then(a.id.cmp(&b.id)));
 		self.chars.list = list;
 		self.chars.list_for = (d.pairs.len(), dir);
+		let keep = self.chars.sel.filter(|id| self.chars.list.iter().any(|r| r.id == *id));
 		self.chars.sel = None;
+		if keep.is_some() {
+			self.chars_select(keep);
+			self.apply_restore_row();
+		}
+		self.restore_row = None;
 	}
 	fn char_ids(&self, id: u32) -> Vec<u32> {
 		self.chars.list.iter().find(|r| r.id == id).map(|r| r.ids.clone()).unwrap_or_else(|| vec![id])
