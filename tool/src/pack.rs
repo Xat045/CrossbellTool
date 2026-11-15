@@ -104,15 +104,15 @@ pub fn has_game(g: &str) -> bool {
 #[test]
 fn roundtrip() {
 	let d = std::env::temp_dir().join(format!("kzpak_test_{}", std::process::id()));
-	std::fs::create_dir_all(d.join("Zero")).unwrap();
-	std::fs::write(d.join("Zero").join("a.png"), b"PNG data").unwrap();
+	std::fs::create_dir_all(d.join("Game")).unwrap();
+	std::fs::write(d.join("Game").join("a.png"), b"PNG data").unwrap();
 	std::fs::write(d.join("b.bin"), vec![7u8; 1000]).unwrap();
 	let out = d.with_extension("dat");
 	assert_eq!(build(&d, &out).unwrap(), 2);
 	let raw = std::fs::read(&out).unwrap();
 	assert!(!raw.windows(8).any(|w| w == b"PNG data") && !raw.windows(5).any(|w| w == b"a.png"));
 	let m = parse(&raw).unwrap();
-	assert_eq!(m["Zero/a.png"], b"PNG data");
+	assert_eq!(m["Game/a.png"], b"PNG data");
 	assert_eq!(m["b.bin"], vec![7u8; 1000]);
 	let mut bad = raw.clone();
 	bad[40] ^= 1;

@@ -99,7 +99,7 @@ fn compile_inner(src: &str, file_name: &str) -> Result<(Vec<u8>, Vec<String>), S
 			Ok((data, rendered))
 		}
 		Some((_, calmare::Content::ED6Scena(_))) if !fatal => {
-			Err(tr("это сценарий ED6 (Trails in the Sky), а не Zero/Azure", "this is an ED6 script (Trails in the Sky), not Zero/Azure").into())
+			Err(tr("это не сценарий Zero / Azure (другой формат)", "not a Zero / Azure script (a different format)").into())
 		}
 		_ => {
 			let mut msg = String::from(tr("ошибки в скрипте:\n", "errors in the script:\n"));
