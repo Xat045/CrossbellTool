@@ -15,7 +15,7 @@ WHAT IT DOES
     from data and English from data_backup;
   • CrossbellTool projects (.json, .xlsx);
   • Japanese text: a folder with only Japanese files (for example a copy of the game's data\scena): if
-    a folder has both scena and scena_us, English is used. The Russian Zero/Azure was translated from English,
+    a folder has both scena and scena_us, English is shown first (JP | EN buttons in the column header). The Russian Zero/Azure was translated from English,
     so the codes in 'Checks' won't match Japanese; use English for checking.
   For example: the Trails from Zero game folder on the left,
   and a CrossbellTool project or an unpacked translation mod on the right.
@@ -33,6 +33,12 @@ WHAT IT DOES
     and a warning appears instead; if the program is wrong, use 'Show anyway'.
   • Table lines are matched by file structure: the pairs are correct even if a Russian table has its lines
     in a different order (as in Azure's t_quest). '- none -' means this language has no such line.
+  • Column language. If a folder has both English and Japanese text (the game folder or data with
+    both scena and scena_us), the column header shows JP | EN buttons instead of a label: a click
+    reloads that column in the chosen language (the second time from the cache, quickly). English is the
+    default on the left; if both fields point to the same folder, Japanese is on the right. The choice is
+    remembered for each folder. A folder with one language has no buttons, the header shows that language;
+    before loading it reads 'JP, EN, RU'. The selected character, file and line stay after switching.
 
 ──────────────────────────────── SEARCH AND THE TABLE
 

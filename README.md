@@ -114,6 +114,8 @@ Each of the two fields accepts:
 
 Click **Load**, or drop the folders on the window. The game is detected from the folder, and on the next start the program reopens where you stopped.
 
+If a folder has both English and Japanese text, the column header has **JP | EN** buttons: a click reloads that column in the chosen language. English is the default on the left. The selected character, file and line stay after switching.
+
 Table lines are matched by file structure, so the pairs stay correct even if a translated table has its lines in a different order. If the two sides come from different games, lines aren't shown and a warning appears instead.
 
 ### Search
