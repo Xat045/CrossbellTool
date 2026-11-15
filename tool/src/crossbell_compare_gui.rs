@@ -501,6 +501,7 @@ impl App {
 		self.searched = false;
 		self.found.clear();
 		self.chip = None;
+		self.chars.list_for = (usize::MAX, "");
 		self.reset_layouts();
 		if !self.search.trim().is_empty() {
 			self.do_search();
@@ -1971,7 +1972,7 @@ impl App {
 		list.sort_by(|a, b| b.lines.cmp(&a.lines).then(a.id.cmp(&b.id)));
 		self.chars.list = list;
 		self.chars.list_for = (d.pairs.len(), dir);
-		let keep = self.chars.sel.filter(|id| self.chars.list.iter().any(|r| r.id == *id));
+		let keep = self.chars.sel.and_then(|id| self.chars.list.iter().find(|r| r.ids.contains(&id)).map(|r| r.id));
 		self.chars.sel = None;
 		if keep.is_some() {
 			self.chars_select(keep);
