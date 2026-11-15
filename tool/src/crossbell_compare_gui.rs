@@ -1779,6 +1779,10 @@ impl App {
 	}
 }
 
+fn lang_key(right: bool) -> &'static str {
+	if right { "textlang_r" } else { "textlang_l" }
+}
+
 fn path_and_browse(ui: &mut egui::Ui, p: &Pal, id: &str, value: &mut String, rect: Rect, enabled: bool) -> (bool, bool) {
 	let bw = small_button_width(ui, tr("Обзор", "Browse"), true);
 	let frect = Rect::from_min_max(rect.min, Pos2::new(rect.max.x - bw - 8.0, rect.max.y));
