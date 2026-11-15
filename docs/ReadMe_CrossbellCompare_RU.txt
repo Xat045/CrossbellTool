@@ -1,4 +1,4 @@
-Сверка перевода (CrossbellCompare) 0.2 — Trails from Zero / Trails to Azure
+Сверка перевода (CrossbellCompare) 0.3 — Trails from Zero / Trails to Azure
 
 ЧТО ДЕЛАЕТ
   Показывает текст двух языков рядом (японский, английский или русский — в любой паре; обычно оригинал
@@ -95,9 +95,9 @@
 
 ──────────────────────────────── ФАЙЛЫ РЯДОМ С ПРОГРАММОЙ
 
-  KisekiTool_compare.ini — настройки (папки, словарь, тема, где вы остановились, масштаб);
-  KisekiCompare_buttons.txt — назначения кнопок;
-  CrossbellCompare_cache — кэш загрузки, там же KisekiCompare_hidden.txt — список «Не ошибка»
+  CrossbellCompare.ini — настройки (папки, словарь, тема, где вы остановились, масштаб);
+  CrossbellCompare_buttons.txt — назначения кнопок;
+  CrossbellCompare_cache — кэш загрузки, там же CrossbellCompare_hidden.txt — список «Не ошибка»
   (Shift+«Загрузить» его не удаляет);
   data.dat — значки и портреты.
 

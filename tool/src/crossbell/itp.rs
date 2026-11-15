@@ -13,9 +13,12 @@ pub struct Decoded {
 	pub old: bool,
 }
 
-fn to_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
+pub fn to_png(img: &RgbaImage) -> Result<Vec<u8>, String> {
+	use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+	use image::ImageEncoder;
 	let mut png = Vec::new();
-	img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageOutputFormat::Png)
+	PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Paeth)
+		.write_image(img.as_raw(), img.width(), img.height(), image::ColorType::Rgba8)
 		.map_err(|e| lformat!("ошибка записи PNG: {e}", "PNG write error: {e}"))?;
 	Ok(png)
 }
@@ -104,14 +107,19 @@ pub fn compile_dds(dds: &[u8], mips: usize, expect: Option<(usize, usize)>) -> R
 		let data = itp32::write(&Itp32 { width: w, height: h, levels }).map_err(|e| lformat!("ошибка записи ITP: {e}", "ITP write error: {e}"))?;
 		return Ok((data, warn));
 	}
-	let png = crate::kai::dds::decompile(dds)?.png;
+	let png = crate::crossbell::dds::decompile(dds)?.png;
 	compile(&png, mips, expect)
 }
 
+pub fn bc7_settings(rgba: &[u8]) -> block_compression::BC7Settings {
+	use block_compression::BC7Settings;
+	if rgba.chunks_exact(4).all(|p| p[3] == 255) { BC7Settings::opaque_very_fast() } else { BC7Settings::alpha_very_fast() }
+}
+
 fn encode_level(img: &RgbaImage) -> Vec<u128> {
-	use block_compression::{CompressionVariant, BC7Settings, encode::compress_rgba8};
+	use block_compression::{CompressionVariant, encode::compress_rgba8};
 	let (w, h) = (img.width(), img.height());
-	let variant = CompressionVariant::BC7(BC7Settings::alpha_fast());
+	let variant = CompressionVariant::BC7(bc7_settings(img.as_raw()));
 	let mut blocks = vec![0u8; variant.blocks_byte_size(w, h)];
 	compress_rgba8(variant, img.as_raw(), &mut blocks, w, h, w * 4);
 	blocks.chunks_exact(16).map(|a| u128::from_le_bytes(a.try_into().unwrap())).collect()
@@ -126,11 +134,10 @@ pub fn compile(png: &[u8], mips: usize, expect: Option<(usize, usize)>) -> Resul
 		return Err(lformat!("размер {w}x{h}: ширина и высота должны делиться на 4", "size {w}x{h}: width and height must be divisible by 4"));
 	}
 	let mut warn = None;
-	if let Some((ew, eh)) = expect {
-		if (ew, eh) != (w, h) {
+	if let Some((ew, eh)) = expect
+		&& (ew, eh) != (w, h) {
 			warn = Some(lformat!("размер изменён: было {ew}x{eh}, стало {w}x{h}", "size changed: was {ew}x{eh}, now {w}x{h}"));
 		}
-	}
 	let mut levels = vec![encode_level(&img)];
 	for n in 1..=mips {
 		let (lw, lh) = (w >> n, h >> n);

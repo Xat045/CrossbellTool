@@ -171,6 +171,7 @@ pub fn read1005(data: &[u8]) -> Result<Itp, Error> {
 		if ncolors != 0 {
 			let colors = c.slice(ncolors as usize)?;
 			nibbles(&mut g, &mut chunk)?;
+			ensure!(chunk.iter().all(|&a| (a as usize) < colors.len()), "itp1005: color index out of range");
 			chunk = chunk.map(|a| colors[a as usize]);
 		}
 		pixels.extend(chunk);

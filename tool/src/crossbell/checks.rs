@@ -136,7 +136,7 @@ fn count(v: Vec<String>) -> HashMap<String, usize> {
 }
 
 fn diff(a: &HashMap<String, usize>, b: &HashMap<String, usize>) -> Vec<String> {
-	let mut v: Vec<String> = a.iter().filter_map(|(k, &n)| (n > *b.get(k).unwrap_or(&0)).then(|| k.clone())).collect();
+	let mut v: Vec<String> = a.iter().filter(|&(k, &n)| n > *b.get(k).unwrap_or(&0)).map(|(k, &_n)| k.clone()).collect();
 	v.sort();
 	v
 }
@@ -146,7 +146,7 @@ fn has_jp(s: &str) -> bool {
 }
 
 fn is_dialogue(file: &str) -> bool {
-	if super::compare::ed7().is_some() { file.starts_with("scena/") } else { file.ends_with(".json") }
+	file.starts_with("scena/")
 }
 
 fn has_cyr(s: &str) -> bool {
@@ -366,11 +366,10 @@ pub fn run(d: &Data) -> Report {
 			for w in broken_ed7(&en.text, &ru.text) {
 				r.findings.push(Finding { cat: CAT_CODES, pair: i, what: w });
 			}
-			if !debug && has_cyr(&ru.text) {
-				if let Some(w) = symbols_ed7(&en.text, &ru.text) {
+			if !debug && has_cyr(&ru.text)
+				&& let Some(w) = symbols_ed7(&en.text, &ru.text) {
 					r.findings.push(Finding { cat: CAT_CODES, pair: i, what: w });
 				}
-			}
 		} else if let Some(w) = broken_newline(&en.text, &ru.text) {
 			r.findings.push(Finding { cat: CAT_CODES, pair: i, what: w });
 		}
@@ -390,11 +389,10 @@ pub fn run(d: &Data) -> Report {
 			}
 			continue;
 		}
-		if !debug && is_dialogue(&p.file) {
-			if let Some(w) = leftover(&strip(&ru.text)) {
+		if !debug && is_dialogue(&p.file)
+			&& let Some(w) = leftover(&strip(&ru.text)) {
 				r.findings.push(Finding { cat: CAT_UNTR, pair: i, what: w });
 			}
-		}
 		let (te, tr) = if has_jp(&en.text) { (jp_free(tokens(&en.text)), jp_free(tokens(&ru.text))) } else { (tokens(&en.text), tokens(&ru.text)) };
 		if let Some(w) = lost_extra(te, tr) {
 			r.findings.push(Finding { cat: CAT_CODES, pair: i, what: w });

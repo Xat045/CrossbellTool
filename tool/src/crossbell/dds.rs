@@ -107,8 +107,7 @@ pub fn decompile(d: &[u8]) -> Result<Decoded, String> {
 		}
 	}
 	let img = RgbaImage::from_raw(i.w, i.h, rgba).ok_or(tr("ошибка размера", "size error"))?;
-	let mut png = Vec::new();
-	img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageOutputFormat::Png).map_err(|e| lformat!("ошибка PNG: {e}", "PNG error: {e}"))?;
+	let png = crate::crossbell::itp::to_png(&img)?;
 	Ok(Decoded { png })
 }
 
@@ -124,7 +123,7 @@ fn encode_level(img: &RgbaImage, fmt: Fmt) -> Vec<u8> {
 			} else {
 				RgbaImage::from_fn(pw, ph, |x, y| *img.get_pixel(x.min(w - 1), y.min(h - 1)))
 			};
-			let v = variant(n);
+			let v = if matches!(variant(n), CompressionVariant::BC7(_)) { CompressionVariant::BC7(crate::crossbell::itp::bc7_settings(padded.as_raw())) } else { variant(n) };
 			let mut out = vec![0u8; v.blocks_byte_size(pw, ph)];
 			block_compression::encode::compress_rgba8(v, padded.as_raw(), &mut out, pw, ph, pw * 4);
 			out

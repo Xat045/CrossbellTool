@@ -11,19 +11,18 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::gui_common::*;
-use crossbell_tool::kai::checks;
-use crossbell_tool::kai::compare::{self, Data};
+use crossbell_tool::crossbell::checks;
+use crossbell_tool::crossbell::compare::{self, Data};
 use std::collections::{HashMap, HashSet};
 
-
 fn ign_file() -> PathBuf {
-	let name = if compare::ed7().is_some() { "KisekiCompare_hidden.txt" } else { "KaiCompare_hidden.txt" };
-	let new = cache_dir().join(name);
-	let old = exe_dir().join(name);
-	if old.is_file() && !new.is_file() {
-		let _ = std::fs::create_dir_all(cache_dir());
-		if std::fs::rename(&old, &new).is_err() && std::fs::copy(&old, &new).is_ok() {
-			let _ = std::fs::remove_file(&old);
+	let new = cache_dir().join("CrossbellCompare_hidden.txt");
+	for old in [cache_dir().join("KisekiCompare_hidden.txt"), exe_dir().join("KisekiCompare_hidden.txt"), exe_dir().join("CrossbellCompare_hidden.txt")] {
+		if old.is_file() && !new.is_file() {
+			let _ = std::fs::create_dir_all(cache_dir());
+			if std::fs::rename(&old, &new).is_err() && std::fs::copy(&old, &new).is_ok() {
+				let _ = std::fs::remove_file(&old);
+			}
 		}
 	}
 	new
@@ -40,7 +39,7 @@ pub fn read_dict(path: &std::path::Path) -> Result<Vec<compare::DictEntry>, Stri
 		return compare::load_dict(path);
 	}
 	let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-	let books = crate::kai_buttons::pack::parse(&raw).ok_or_else(|| lformat!("{}: файл повреждён или это не словарь", "{}: the file is damaged or is not a dictionary", path.display()))?;
+	let books = crate::crossbell_buttons::pack::parse(&raw).ok_or_else(|| lformat!("{}: файл повреждён или это не словарь", "{}: the file is damaged or is not a dictionary", path.display()))?;
 	let mut names: Vec<&String> = books.keys().collect();
 	names.sort();
 	compare::dict_from_books(names.into_iter().map(|n| (n.as_str(), books[n].as_slice())))
@@ -58,22 +57,22 @@ fn clamp_safe(v: f32, min: f32, max: f32) -> f32 {
 	v.min(max).max(min)
 }
 
-const FACE: f32 = 52.0;
+const FACE: f32 = 64.0;
+const ED7_CELL: u32 = 96;
+const ED7_COLS: u32 = 10;
 
-fn face_index(pack: &'static [u8]) -> HashMap<u32, &'static [u8]> {
-	let mut out = HashMap::new();
-	if pack.len() < 12 || &pack[..6] != b"KFACE1" {
-		return out;
-	}
-	let u = |o: usize| pack.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-	let mut o = 12;
-	for _ in 0..u(8).unwrap_or(0) {
-		let (Some(code), Some(len)) = (u(o), u(o + 4)) else { break };
-		let Some(png) = pack.get(o + 8..o + 8 + len as usize) else { break };
-		out.insert(code, png);
-		o += 8 + len as usize;
-	}
-	out
+fn face_index(tsv: &str) -> HashMap<u32, (u32, u32)> {
+	tsv.lines()
+		.filter_map(|l| {
+			let mut c = l.split('\t').map(|x| x.trim().parse::<u32>());
+			Some((c.next()?.ok()?, (c.next()?.ok()?, c.next()?.ok()?)))
+		})
+		.collect()
+}
+
+fn ed7_cell(a: &image::RgbaImage, cell: u32) -> Option<image::RgbaImage> {
+	let (x, y) = ((cell % ED7_COLS) * ED7_CELL, (cell / ED7_COLS) * ED7_CELL);
+	(x + ED7_CELL <= a.width() && y + ED7_CELL <= a.height()).then(|| image::imageops::crop_imm(a, x, y, ED7_CELL, ED7_CELL).to_image())
 }
 
 fn face_code(text: &str) -> Option<u32> {
@@ -130,7 +129,7 @@ fn group(n: usize) -> String {
 	let s = n.to_string();
 	let mut out = String::new();
 	for (i, c) in s.chars().enumerate() {
-		if i > 0 && (s.len() - i) % 3 == 0 {
+		if i > 0 && (s.len() - i).is_multiple_of(3) {
 			out.push('\u{202f}');
 		}
 		out.push(c);
@@ -177,10 +176,16 @@ pub struct App {
 	selected: Option<usize>,
 	click_col: usize,
 	inline: Option<Inline>,
-	face_idx: HashMap<&'static str, HashMap<u32, &'static [u8]>>,
+	face_idx: HashMap<&'static str, HashMap<u32, (u32, u32)>>,
+	ed7_atlas: HashMap<(&'static str, u32), Option<image::RgbaImage>>,
 	face_tex: HashMap<(&'static str, u32), Option<egui::TextureHandle>>,
+
+	chars: Chars,
+	show_faces: bool,
 	open_group: Option<(usize, String)>,
 	top_row: usize,
+	top_off: f32,
+	anchor: Option<(usize, f32)>,
 	checks_off: f32,
 	restore_row: Option<(bool, String, String)>,
 	restore_file: Option<String>,
@@ -205,7 +210,7 @@ pub struct App {
 	rows_all_cache: Option<std::rc::Rc<Vec<Row>>>,
 	game_ok: bool,
 	drop_split: f32,
-	btn: crate::kai_buttons::Buttons,
+	btn: crate::crossbell_buttons::Buttons,
 	record: std::collections::HashMap<usize, u32>,
 	ui_extra: std::collections::HashMap<usize, u32>,
 	btn_open: bool,
@@ -218,7 +223,11 @@ impl App {
 		setup_fonts(&cc.egui_ctx);
 		set_dialog_owner(cc);
 		egui_extras::install_image_loaders(&cc.egui_ctx);
-		let st = if compare::ed7().is_some() { Settings::load("KisekiTool_compare.ini", "KisekiCompare") } else { Settings::load("KaiCompare.ini", "KaiCompare") };
+		let (old, new) = (exe_dir().join("KisekiTool_compare.ini"), exe_dir().join("CrossbellCompare.ini"));
+		if old.is_file() && !new.is_file() && std::fs::rename(&old, &new).is_err() {
+			let _ = std::fs::copy(&old, &new);
+		}
+		let st = Settings::load("CrossbellCompare.ini", "CrossbellCompare");
 		UI_EN.store(st.get("lang") != Some("ru"), std::sync::atomic::Ordering::Relaxed);
 		let pal = Pal::get(st.get("dark") == Some("1"));
 		apply_visuals(&cc.egui_ctx, &pal);
@@ -258,9 +267,14 @@ impl App {
 			click_col: 2,
 			inline: None,
 			face_idx: HashMap::new(),
+			ed7_atlas: HashMap::new(),
 			face_tex: HashMap::new(),
+			chars: Chars::default(),
+			show_faces: st.get("faces") != Some("0"),
 			open_group: None,
 			top_row: 0,
+			top_off: 0.0,
+			anchor: None,
 			checks_off: 0.0,
 			restore_row: None,
 			restore_file: None,
@@ -287,7 +301,7 @@ impl App {
 			drop_split: f32::MAX,
 			record: Default::default(),
 			ui_extra: Default::default(),
-			btn: crate::kai_buttons::Buttons::new(st.get("btn_on") == Some("1"), st.get("btn_dev").and_then(|v| v.parse().ok()).unwrap_or(0), st.get_or("btn_dir", "").to_string()),
+			btn: crate::crossbell_buttons::Buttons::new(st.get("btn_on") == Some("1"), st.get("btn_dev").and_then(|v| v.parse().ok()).unwrap_or(0), st.get_or("btn_dir", "").to_string()),
 			btn_open: false,
 			btn_sel: None,
 			btn_codes: None,
@@ -314,7 +328,7 @@ impl App {
 		if app.btn.on {
 			app.btn.ensure_loaded();
 		}
-		if app.en_dir().is_dir() && app.ru_dir().is_dir() {
+		if app.can_load() {
 			app.start_load(&cc.egui_ctx);
 		}
 		app
@@ -327,6 +341,10 @@ impl App {
 	fn en_dir(&self) -> PathBuf {
 		PathBuf::from(self.en.trim())
 	}
+	fn can_load(&self) -> bool {
+		let (en, ru) = (self.en_dir().is_dir(), self.ru_dir().is_dir());
+		(en && ru) || (en && self.ru.trim().is_empty()) || (ru && self.en.trim().is_empty())
+	}
 	pub fn ru_dir(&self) -> PathBuf {
 		PathBuf::from(self.ru.trim())
 	}
@@ -336,6 +354,7 @@ impl App {
 		st.set("english", &self.en);
 		st.set("russian", &self.ru);
 		st.set("whole", if self.whole { "1" } else { "0" });
+		st.set("faces", if self.show_faces { "1" } else { "0" });
 		st.set("dictok", if self.mark_ok { "1" } else { "0" });
 		st.set("dark", if self.pal.dark { "1" } else { "0" });
 		st.set("lang", if ui_en() { "en" } else { "ru" });
@@ -372,13 +391,19 @@ impl App {
 		if self.loading.is_some() {
 			return;
 		}
-		let (en, ru) = (self.en_dir(), self.ru_dir());
-		if !en.is_dir() || !ru.is_dir() {
-			self.dialog = Dialog::Info(if compare::ed7().is_some() {
-				tr("Укажите обе папки: слева и справа (японские, английские или русские файлы).\nПодходят папка data игры, папка русификатора или папка проекта (.json, .xlsx).", "Choose both folders, left and right (Japanese, English or Russian files).\nA game data folder, a translation mod's folder or a project folder (.json, .xlsx) will do.").into()
+		let (mut en, mut ru) = (self.en_dir(), self.ru_dir());
+		let (en_empty, ru_empty) = (self.en.trim().is_empty(), self.ru.trim().is_empty());
+		if (en.is_dir() && ru_empty) || (ru.is_dir() && en_empty) {
+			let none = cache_dir().join("_empty");
+			let _ = std::fs::create_dir_all(&none);
+			if en_empty {
+				en = none;
 			} else {
-				tr("Укажите обе папки: слева и справа — японские, английские или русские файлы (.json, .xlsx, .yaml, декомпилированные CrossbellTool).", "Choose both folders, left and right: Japanese, English or Russian files (.json, .xlsx, .yaml decompiled by CrossbellTool).").into()
-			});
+				ru = none;
+			}
+		}
+		if !en.is_dir() || !ru.is_dir() {
+			self.dialog = Dialog::Info(tr("Укажите папку слева, справа или обе (японские, английские или русские файлы); с одной папкой второй столбец будет пустым.\nПодходят папка игры (data), папка русификатора или проекты CrossbellTool (.json, .xlsx).", "Choose the left folder, the right one or both (Japanese, English or Russian files); with one folder the second column stays empty.\nThe game folder (data), a translation patch folder or CrossbellTool projects (.json, .xlsx) will do.").into());
 			return;
 		}
 		self.save_settings();
@@ -436,26 +461,15 @@ impl App {
 		self.file_sel = 0;
 		self.load_warn = d.warnings.len();
 		self.load_status = if d.pairs.is_empty() {
-			tr("ничего не найдено — укажите папки проекта CrossbellTool", "nothing found: choose CrossbellTool project folders").into()
+			tr("ничего не найдено — укажите папку игры или проекта CrossbellTool", "nothing found: choose the game folder or a CrossbellTool project").into()
 		} else {
 			format!("{} · {}", plural(d.files.len(), tr("файл", "file"), tr("файла", "files"), tr("файлов", "files")), plural(d.pairs.len(), tr("строка", "line"), tr("строки", "lines"), tr("строк", "lines")))
 		};
 		for w in &d.warnings {
 			eprintln!("{w}");
 		}
-		self.record = if compare::ed7().is_some() { crate::kai_buttons::record_cells(&d) } else { Default::default() };
-		self.ui_extra = if compare::ed7().is_none() {
-			let mut m = crate::kai_buttons::sibling_icons(&d);
-			m.extend(crate::kai_buttons::cond_icons(&d));
-			m
-		} else {
-			Default::default()
-		};
-		if compare::ed7().is_none() {
-			let en = self.en_path();
-			let places: Vec<PathBuf> = [Some(en.clone()), en.parent().map(|p| p.to_path_buf()), en.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf())].into_iter().flatten().collect();
-			self.btn.load_kai_items(&places);
-		}
+		self.record = crate::crossbell_buttons::record_cells(&d);
+		self.ui_extra = Default::default();
 		self.data = Some(d);
 		self.report = Some(report);
 		self.rows_cache = None;
@@ -474,20 +488,18 @@ impl App {
 		if !self.search.trim().is_empty() {
 			self.do_search();
 		}
-		if let (Some(f), Some(d)) = (self.restore_file.take(), self.data.as_ref()) {
-			if let Some(n) = d.files.keys().position(|k| *k == f) {
+		if let (Some(f), Some(d)) = (self.restore_file.take(), self.data.as_ref())
+			&& let Some(n) = d.files.keys().position(|k| *k == f) {
 				self.file_sel = n + 1;
 				self.show_file();
 			}
-		}
-		if let (Some((sel, f, id)), Some(d)) = (self.restore_row.take(), self.data.as_ref()) {
-			if let Some(i) = self.rows.iter().position(|&k| d.pairs[k].file == f && d.pairs[k].id == id) {
+		if let (Some((sel, f, id)), Some(d)) = (self.restore_row.take(), self.data.as_ref())
+			&& let Some(i) = self.rows.iter().position(|&k| d.pairs[k].file == f && d.pairs[k].id == id) {
 				self.scroll_to = Some(i);
 				if sel {
 					self.selected = Some(i);
 				}
 			}
-		}
 	}
 
 	fn load_dict(&mut self, path: &std::path::Path, force: bool) {
@@ -537,17 +549,38 @@ impl App {
 			self.reset_layouts();
 			return;
 		}
-		let Some(d) = self.data.as_ref() else {
+		if self.data.is_none() {
 			if self.loading.is_none() {
 				self.dialog = Dialog::Info(tr("Сначала нажмите «Загрузить».", "Click 'Load' first.").into());
 			}
 			return;
-		};
-		let (all, total) = compare::search(d, &q, 0, self.whole, usize::MAX);
+		}
+		let who = if self.chars.open { self.chars.sel } else { None };
+		if who.is_some() && q.is_empty() {
+			self.chars_select(who);
+			return;
+		}
+		let d = self.data.as_ref().unwrap();
+		let (mut all, mut total) = compare::search(d, &q, 0, self.whole, usize::MAX);
+		let who_name = who.and_then(|id| self.chars.list.iter().find(|r| r.id == id)).map(|r| format!("{}: ", r.name)).unwrap_or_default();
+		if let Some(id) = who {
+			let ids = self.char_ids(id);
+			all.retain(|&i| Self::row_who(&d.pairs[i]).is_some_and(|w| ids.contains(&w)));
+			total = all.len();
+		} else if compare::ed7().is_some() && q.chars().count() >= 3 {
+			let ql = q.to_lowercase();
+			let ids: Vec<u32> = ed7_names().iter().filter(|x| x.2.to_lowercase().contains(&ql) || x.3.to_lowercase().contains(&ql)).filter_map(|x| ed7_who(x.0)).collect();
+			if !ids.is_empty() {
+				let mut set: std::collections::BTreeSet<usize> = all.iter().copied().collect();
+				set.extend((0..d.pairs.len()).filter(|&i| Self::row_who(&d.pairs[i]).is_some_and(|w| ids.contains(&w))));
+				all = set.into_iter().collect();
+				total = all.len();
+			}
+		}
 		let rows: Vec<usize> = all[..all.len().min(LIMIT)].to_vec();
 		let files: std::collections::BTreeSet<&str> = rows.iter().map(|&i| d.pairs[i].file.as_str()).collect();
-		self.found = if total == 0 {
-			tr("Ничего не найдено", "Nothing found").into()
+		self.found = who_name.clone() + &if total == 0 {
+			tr("Ничего не найдено", "Nothing found").to_string()
 		} else if total > rows.len() {
 			lformat!("Найдено: {} в {} — показаны первые {}", "Found: {} in {}, showing the first {}", plural(total, tr("строка", "line"), tr("строки", "lines"), tr("строк", "lines")), plural(files.len(), tr("файле", "file"), tr("файлах", "files"), tr("файлах", "files")), group(rows.len()))
 		} else {
@@ -600,6 +633,9 @@ impl App {
 	}
 
 	fn reset_layouts(&mut self) {
+		if self.top_row > 0 && self.top_row < self.rows.len() && self.anchor.is_none() {
+			self.anchor = Some((self.top_row, self.top_off));
+		}
 		self.layouts = (0..self.rows.len()).map(|_| None).collect();
 		self.layout_next = 0;
 		let (ten, tru) = compare::pair_terms_for_query(&self.dict, &self.query);
@@ -625,49 +661,11 @@ impl App {
 		let d = self.data.as_ref().unwrap();
 		let pair = &d.pairs[self.rows[i]];
 		let icons_on = self.btn.on;
-		let rank = {
-			let pr = &d.pairs[self.rows[i]];
-			let f = pr.file.rsplit('/').next().unwrap_or("");
-			if !icons_on || compare::ed7().is_some() {
-				None
-			} else if f.starts_with("t_skill.") {
-				pr.id.strip_prefix("SkillParam#").and_then(|r| r.strip_suffix(".name")).and_then(|k| k.parse::<u32>().ok()).and_then(|k| self.btn.kai_skill_rank.get(&k).cloned())
-			} else if f.starts_with("t_item.") {
-				pr.id.strip_prefix("ItemTableData#").and_then(|r| r.strip_suffix(".name")).and_then(|k| k.parse::<u32>().ok()).and_then(|k| self.btn.kai_item_tail.get(&k).cloned())
-			} else {
-				None
-			}
-		};
-		let rec = self.record.get(&self.rows[i]).copied().map(|c| crate::kai_buttons::RECORD_BASE + c).or_else(|| {
+		let rank: Option<Vec<u32>> = None;
+		let rec = self.record.get(&self.rows[i]).copied().map(|c| crate::crossbell_buttons::RECORD_BASE + c).or_else(|| {
 			let pr = &d.pairs[self.rows[i]];
 			let fname = pr.file.rsplit('/').next().unwrap_or("");
-			if compare::ed7().is_some() && fname.starts_with("t_magic") {
-				pr.en.as_ref().and_then(|s| self.btn.craft_cell(&s.text))
-			} else if compare::ed7().is_none() && fname.starts_with("t_item.") {
-				pr.id.strip_prefix("ItemTableData#").and_then(|r| {
-					let (k, f) = r.split_once('.')?;
-					(f == "name" || f == "description").then_some(())?;
-					self.btn.kai_items.get(&k.parse::<u32>().ok()?).copied()
-				})
-			} else if compare::ed7().is_none() && fname.starts_with("t_skill.") {
-				pr.id.strip_prefix("SkillParam#").and_then(|r| {
-					let (k, f) = r.split_once('.')?;
-					(f == "name" || f.starts_with("description")).then_some(())?;
-					self.btn.kai_skills.get(&k.parse::<u32>().ok()?).copied()
-				})
-			} else if compare::ed7().is_none() && fname.starts_with("t_itemhelp.") && pr.id.starts_with("SkillRangeHelpData#") {
-				pr.id.strip_prefix("SkillRangeHelpData#").and_then(|r| {
-					let (k, f) = r.split_once('.')?;
-					(f == "text1" || f == "text2").then_some(())?;
-					self.btn.kai_ranges.get(&k.parse::<u32>().ok()?).copied()
-				})
-			} else if compare::ed7().is_none() && fname.starts_with("t_itemhelp.") && self.btn.kai_help.contains_key(&pr.id) {
-				self.btn.kai_help.get(&pr.id).copied()
-			} else if compare::ed7().is_none() {
-				crate::kai_buttons::ui_icon(&pr.file, &pr.id).or_else(|| self.ui_extra.get(&self.rows[i]).copied())
-			} else {
-				None
-			}
+			if fname.starts_with("t_magic") { pr.en.as_ref().and_then(|s| self.btn.craft_cell(&s.text)) } else { None }
 		}).filter(|_| icons_on);
 		let make = |side: &Option<compare::Side>, dict_terms: &[String], w: f32| -> (Arc<egui::Galley>, Vec<(usize, usize, u32)>) {
 			let mut icons: Vec<(usize, usize, u32)> = Vec::new();
@@ -682,13 +680,13 @@ impl App {
 					job.append(s.text.trim(), 0.0, fmt(Color32::TRANSPARENT, p.muted));
 				}
 				Some(s) => {
-					let with_icons = icons_on && crate::kai_buttons::has_codes(&s.text);
-					let mut text = if with_icons { compare::clean(&crate::kai_buttons::mark_codes(&s.text), true) } else { compare::clean(&s.text, true) };
-					if let Some(c) = rec.and_then(|c| char::from_u32(crate::kai_buttons::SENT0 + c)) {
+					let with_icons = icons_on && crate::crossbell_buttons::has_codes(&s.text);
+					let mut text = if with_icons { compare::clean(&crate::crossbell_buttons::mark_codes(&s.text), true) } else { compare::clean(&s.text, true) };
+					if let Some(c) = rec.and_then(|c| char::from_u32(crate::crossbell_buttons::SENT0 + c)) {
 						text = format!("{c} {text}");
 					}
 					if let Some(tail) = &rank {
-						let t: String = tail.iter().filter_map(|&c| char::from_u32(crate::kai_buttons::SENT0 + c)).collect();
+						let t: String = tail.iter().filter_map(|&c| char::from_u32(crate::crossbell_buttons::SENT0 + c)).collect();
 						if !t.is_empty() {
 							text = format!("{text} {t}");
 						}
@@ -721,7 +719,7 @@ impl App {
 						let mut a = k;
 						while a < e {
 							let mut b = a;
-							while b < e && crate::kai_buttons::code_of(chars[b]).is_none() {
+							while b < e && crate::crossbell_buttons::code_of(chars[b]).is_none() {
 								b += 1;
 							}
 							if b > a {
@@ -730,14 +728,14 @@ impl App {
 								job.append(&seg, 0.0, fmt(bg, p.text));
 							}
 							if b < e {
-								let n = crate::kai_buttons::code_of(chars[b]).unwrap_or(0);
+								let n = crate::crossbell_buttons::code_of(chars[b]).unwrap_or(0);
 								if self.btn.drawable(n) {
 									let asp = self.btn.aspect(n).clamp(0.6, 3.5);
 									job.append("\u{2003}", 2.0, egui::TextFormat { font_id: f_body(21.0 * asp * z), color: Color32::TRANSPARENT, background: bg, line_height: Some(20.3 * z), ..Default::default() });
 									icons.push((out_n, 1, n));
 									out_n += 1;
 								} else {
-									let lab = if compare::ed7().is_some() { format!(" {} ", crate::kai_buttons::code_label(n)) } else { format!(" {n} ") };
+									let lab = format!(" {} ", crate::crossbell_buttons::code_label(n));
 									out_n += lab.chars().count();
 									job.append(&lab, 1.0, egui::TextFormat { font_id: f_mono(11.5 * z), color: p.muted, background: p.div2, line_height: Some(20.3 * z), ..Default::default() });
 								}
@@ -763,7 +761,7 @@ impl App {
 		};
 		let mut h = en.size().y.max(ru.size().y).max(34.0) + 18.0;
 		if self.row_face(i).is_some() {
-			h = h.max(FACE + 12.0);
+			h = h.max(FACE + 4.0);
 		}
 		if self.row_voice(i).is_some() {
 			h = h.max(64.0);
@@ -772,57 +770,43 @@ impl App {
 	}
 
 	fn face_pack() -> &'static str {
-		use crossbell_tool::kai::game::{self, Game};
 		match compare::ed7() {
-			Some(crossbell_tool::scena::Title::Azure) => "Azure/faces.bin",
-			Some(_) => "Zero/faces.bin",
-			None => match game::current() {
-				Game::Daybreak => "Daybreak-1/faces.bin",
-				Game::Daybreak2 => "Daybreak-2/faces.bin",
-				Game::Horizon => "Horizon/faces.bin",
-			},
+			Some(crossbell_tool::crossbell::scena::Title::Azure) => "Azure",
+			_ => "Zero",
 		}
 	}
 
 	fn row_face(&self, i: usize) -> Option<u32> {
+		if !self.show_faces {
+			return None;
+		}
 		let d = self.data.as_ref()?;
 		let pair = &d.pairs[*self.rows.get(i)?];
-		if compare::ed7().is_some() {
-			return pair.ru.as_ref().and_then(|s| face_code(&s.text)).or_else(|| pair.en.as_ref().and_then(|s| face_code(&s.text)));
-		}
-		if let Some(id) = pair.who {
-			return compare::speaker_face(Self::face_pack().split('/').next()?, id);
-		}
-		if !pair.file.ends_with("t_active_voice.xlsx") {
-			return None;
-		}
-		let n: usize = pair.id.strip_prefix("ActiveVoiceTableData#")?.strip_suffix(".voice_subtitle")?.parse().ok()?;
-		let av = crate::kai_buttons::pack::get(&Self::face_pack().replace("faces.bin", "active_voice.bin"))?;
-		if av.len() < 12 || &av[..5] != b"KAVF1" {
-			return None;
-		}
-		let code = u32::from_le_bytes(av.get(12 + n * 4..16 + n * 4)?.try_into().ok()?);
-		(code != u32::MAX).then_some(code)
+		pair.ru.as_ref().and_then(|s| face_code(&s.text)).or_else(|| pair.en.as_ref().and_then(|s| face_code(&s.text)))
+	}
+
+	fn row_who(pair: &compare::Pair) -> Option<u32> {
+		let code = pair.ru.as_ref().and_then(|s| face_code(&s.text)).or_else(|| pair.en.as_ref().and_then(|s| face_code(&s.text)))?;
+		ed7_who(code)
 	}
 
 	fn row_voice(&self, i: usize) -> Option<String> {
 		let d = self.data.as_ref()?;
 		let pair = &d.pairs[*self.rows.get(i)?];
-		if compare::ed7().is_some() {
-			let t = pair.en.as_ref().or(pair.ru.as_ref())?;
-			return voice_code(&t.text).map(|v| lformat!("голос {v}", "voice {v}"));
-		}
-		(pair.file.ends_with("t_active_voice.xlsx") && pair.id.ends_with(".voice_subtitle")).then(|| tr("голос", "voice").to_string())
+		let t = pair.en.as_ref().or(pair.ru.as_ref())?;
+		voice_code(&t.text).map(|v| lformat!("голос {v}", "voice {v}"))
 	}
-
 	fn face(&mut self, ctx: &egui::Context, code: u32) -> Option<egui::TextureHandle> {
 		let game = Self::face_pack();
 		if let Some(t) = self.face_tex.get(&(game, code)) {
 			return t.clone();
 		}
-		let idx = self.face_idx.entry(game).or_insert_with(|| crate::kai_buttons::pack::get(game).map(face_index).unwrap_or_default());
-		let tex = idx.get(&code).and_then(|png| image::load_from_memory(png).ok()).map(|img| {
-			let img = img.to_rgba8();
+		let idx = self.face_idx.entry(game).or_insert_with(|| face_index(&crate::crossbell_buttons::pack::get(&format!("{game}/faces.tsv")).map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default()));
+		let img = idx.get(&code).copied().and_then(|(n, cell)| {
+			let atlas = self.ed7_atlas.entry((game, n)).or_insert_with(|| crate::crossbell_buttons::pack::get(&format!("{game}/faces_{n}.png")).and_then(|b| image::load_from_memory(b).ok()).map(|i| i.to_rgba8()));
+			atlas.as_ref().and_then(|a| ed7_cell(a, cell))
+		});
+		let tex = img.map(|img| {
 			let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
 			ctx.load_texture(format!("face{game}_{code}"), ci, egui::TextureOptions::LINEAR)
 		});
@@ -927,12 +911,11 @@ impl App {
 		let fy = y + lh + 5.0;
 		{
 			let (ch, cl) = path_and_browse(ui, &p, "en", &mut self.en, Rect::from_min_size(Pos2::new(x0, fy), Vec2::new(c1, 36.0)), !busy);
-			if cl {
-				if let Some(d) = pick_folder(&self.en) {
+			if cl
+				&& let Some(d) = pick_folder(&self.en) {
 					self.en = d.display().to_string();
 					self.save_settings();
 				}
-			}
 			if ch {
 				self.save_settings();
 			}
@@ -943,12 +926,11 @@ impl App {
 		{
 			let rect = Rect::from_min_size(Pos2::new(x2, fy), Vec2::new(c2, 36.0));
 			let (ch, cl) = path_and_browse(ui, &p, "ru", &mut self.ru, rect, !busy);
-			if cl {
-				if let Some(d) = pick_folder(&self.ru) {
+			if cl
+				&& let Some(d) = pick_folder(&self.ru) {
 					self.ru = d.display().to_string();
 					self.save_settings();
 				}
-			}
 			if ch {
 				self.save_settings();
 			}
@@ -1006,11 +988,10 @@ impl App {
 		let g = ui.fonts(|f| f.layout_job(job));
 		let sresp = ui.interact(Rect::from_min_size(Pos2::new(x4, y), Vec2::new(last, lh)), ui.id().with("loadstat"), Sense::hover());
 		ui.painter().galley(Pos2::new(x4 + (last - g.size().x) / 2.0, y + 2.0), g, p.muted);
-		if self.load_warn > 0 {
-			if let Some(d) = &self.data {
+		if self.load_warn > 0
+			&& let Some(d) = &self.data {
 				sresp.on_hover_text(lformat!("{}\n\nНе прочитаны (ошибка в файле — например, «\\» без n):\n{}", "{}\n\nNot read (an error in the file, for example a '\\' without n):\n{}", self.load_status, d.warnings.iter().take(10).cloned().collect::<Vec<_>>().join("\n")));
 			}
-		}
 		{
 			let rect = Rect::from_min_size(Pos2::new(x4, fy), Vec2::new(last, 36.0));
 			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(rect));
@@ -1031,7 +1012,6 @@ impl App {
 		let bar = Rect::from_min_size(full.min, Vec2::new(full.width(), h));
 		ui.painter().rect_filled(bar, 0, p.surface);
 		ui.painter().line_segment([Pos2::new(bar.min.x, bar.max.y - 0.5), Pos2::new(bar.max.x, bar.max.y - 0.5)], Stroke::new(1.0, p.div));
-		let ed7 = compare::ed7().is_some();
 		let (name, ver, games) = ("CrossbellCompare", env!("VER_CROSSBELLCOMPARE"), "Zero · Azure");
 		let ver = format!("{ver}{}", env!("VER_SUFFIX"));
 		let cy = bar.center().y;
@@ -1053,7 +1033,7 @@ impl App {
 		let mut r = ui.new_child(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)));
 		r.spacing_mut().item_spacing.x = 8.0;
 		if small_button(&mut r, &p, tr("О программе", "About"), Some("info"), 30.0, true, p.text).clicked() {
-			let st = if ed7 { "KisekiTool_compare.ini" } else { "KaiCompare.ini" };
+			let st = "CrossbellCompare.ini";
 			self.dialog = Dialog::Info(lformat!("{name} {ver}\nДата сборки: {}\nИгры: {}\n\nНастройки: {}\nПапка программы: {}", "{name} {ver}\nBuild date: {}\nGames: {}\n\nSettings: {}\nProgram folder: {}",
 				build_date(),
 				games.replace(" · ", ", "),
@@ -1150,9 +1130,18 @@ impl App {
 		let mut r = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
 		r.spacing_mut().item_spacing.x = 10.0;
 		let _ = ctx;
-		let bl = if self.btn.on { lformat!("Значки: {}", "Icons: {}", crate::kai_buttons::devices()[self.btn.device]) } else { tr("Значки кнопок: выкл", "Button icons: off").to_string() };
+		let bl = if self.btn.on { lformat!("Значки: {}", "Icons: {}", crate::crossbell_buttons::devices()[self.btn.device]) } else { tr("Значки кнопок: выкл", "Button icons: off").to_string() };
 		if small_button(&mut r, &p, &bl, Some("gamepad"), 30.0, true, if self.btn.on { p.accent_strong } else { p.text }).on_hover_text(tr("Значки предметов и кнопок вместо кодов <I…> в русском тексте", "Item and button icons instead of <I…> codes in the Russian text")).clicked() {
 			self.btn_open = true;
+		}
+		{
+			let on = self.chars.open;
+			if small_button(&mut r, &p, tr("Персонажи", "Characters"), Some("filter"), 30.0, self.data.is_some(), if on { p.accent_strong } else { p.text }).on_hover_text(tr("Все реплики выбранного персонажа", "All lines of the chosen character")).clicked() {
+				self.chars.open = !on;
+				if on {
+					self.chars_select(None);
+				}
+			}
 		}
 		r.add_space(12.0);
 		let cw = (w * 0.22).clamp(200.0, 380.0).min((r.available_width() - left_used - 12.0).max(140.0));
@@ -1280,6 +1269,9 @@ impl App {
 		let body = Rect::from_min_max(Pos2::new(inner.min.x, hy + 1.0), inner.max);
 		let key = ((wen.round()) as u32, (wru.round()) as u32, p.dark, (self.zoom * 100.0).round() as u32);
 		if key != self.layout_key {
+			if self.layout_key != (0, 0, false, 0) && self.top_row > 0 && self.anchor.is_none() {
+				self.anchor = Some((self.top_row, self.top_off));
+			}
 			self.layout_key = key;
 			for l in &mut self.layouts {
 				*l = None;
@@ -1324,6 +1316,17 @@ impl App {
 		let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rows_rect));
 		child.set_clip_rect(rows_rect.intersect(ui.clip_rect()));
 		let mut sa = egui::ScrollArea::vertical().id_salt("table").auto_shrink([false, false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden);
+		if let Some((a, d)) = self.anchor {
+			if a >= n || self.scroll_to.is_some() || self.scroll_top || self.bar_set.contains_key("table") || auto_v != 0.0 || ctx.input(|i| i.raw_scroll_delta.y != 0.0) {
+				self.anchor = None;
+			} else {
+				let off: f32 = self.layouts[..a].iter().map(|l| l.as_ref().map(|l| l.h).unwrap_or(est)).sum();
+				sa = sa.vertical_scroll_offset(off + d);
+				if self.layout_next >= a {
+					self.anchor = None;
+				}
+			}
+		}
 		if let Some(o) = self.bar_set.remove("table") {
 			sa = sa.vertical_scroll_offset(o);
 		}
@@ -1362,6 +1365,7 @@ impl App {
 				}
 				if first {
 					self.top_row = i;
+					self.top_off = (vp.min.y - y).max(0.0);
 					first = false;
 				}
 				if self.layouts[i].is_none() {
@@ -1373,16 +1377,21 @@ impl App {
 				let rr =Rect::from_min_size(Pos2::new(origin.x, origin.y + y), Vec2::new(rows_rect.width(), lay.h));
 				let resp = ui.interact(rr, ui.id().with(("row", i)), Sense::click());
 				let sel = self.selected == Some(i);
+				let fill = Rect::from_min_max(rr.min, Pos2::new(rr.max.x, rr.max.y - 1.0));
 				if sel {
-					ui.painter().rect_filled(rr, 0, p.sel);
+					ui.painter().rect_filled(fill, 0, p.sel);
 				} else if lay.ok == 1 {
-					ui.painter().rect_filled(rr, 0, p.ok);
+					ui.painter().rect_filled(fill, 0, p.ok);
 				}
 				if resp.hovered() {
 					ui.painter().rect_filled(Rect::from_min_size(rr.min, Vec2::new(3.0, rr.height())), 0, p.accent);
 					hover_pos = Some(i);
 				}
-				ui.painter().line_segment([Pos2::new(rr.min.x, rr.max.y), Pos2::new(rr.max.x, rr.max.y)], Stroke::new(1.0, p.text.gamma_multiply(0.2)));
+				let grid = Stroke::new(1.0, p.text.gamma_multiply(0.3));
+				ui.painter().line_segment([Pos2::new(rr.min.x, rr.max.y - 0.5), Pos2::new(rr.max.x, rr.max.y - 0.5)], grid);
+				for x in [rr.min.x + wfile, rr.min.x + wfile + wen] {
+					ui.painter().line_segment([Pos2::new(x, rr.min.y), Pos2::new(x, rr.max.y)], grid);
+				}
 				let d = self.data.as_ref().unwrap();
 				let pair = &d.pairs[self.rows[i]];
 				let side = pair.ru.as_ref().or(pair.en.as_ref());
@@ -1390,8 +1399,9 @@ impl App {
 				let fx = rr.min.x + 12.0;
 				let face_w = if face.is_some() && wfile > FACE + 60.0 { FACE + 8.0 } else { 0.0 };
 				if let (Some(t), true) = (&face, face_w > 0.0) {
-					let r = Rect::from_min_size(Pos2::new(rr.min.x + wfile - 10.0 - FACE, rr.min.y + 6.0), Vec2::splat(FACE));
+					let r = Rect::from_min_size(Pos2::new(rr.min.x + wfile - 10.0 - FACE, rr.center().y - FACE / 2.0), Vec2::splat(FACE));
 					ui.painter().image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+					ui.painter().rect_stroke(r, 4, Stroke::new(1.0, p.text.gamma_multiply(0.35)), StrokeKind::Inside);
 				}
 				let fr = Rect::from_min_size(Pos2::new(fx, rr.min.y + 9.0), Vec2::new(wfile - 24.0 - face_w, 16.0));
 				paint_text_clipped(ui, fr, &display_name(pair), f_mono(11.5), p.muted, Align2::LEFT_TOP);
@@ -1489,7 +1499,7 @@ impl App {
 						ui.set_width(cell.width() - 16.0);
 						let mut t: &str = &il.text;
 						let resp = ui.add(egui::TextEdit::multiline(&mut t).id(egui::Id::new("inline_te")).frame(false).font(if il.col == 0 { f_mono(12.5) } else { f_body(14.0 * self.zoom) }).desired_width(cell.width() - 16.0).desired_rows(1).margin(egui::Margin::ZERO));
-						if !resp.has_focus() && ui.input(|i| i.pointer.any_click()) == false {
+						if !resp.has_focus() && !ui.input(|i| i.pointer.any_click()) {
 							resp.request_focus();
 						}
 					});
@@ -1498,13 +1508,11 @@ impl App {
 			if ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Enter)) {
 				close = true;
 			}
-			if ctx.input(|i| i.pointer.any_pressed()) {
-				if let Some(pp) = pos {
-					if !area.response.rect.contains(pp) && clicked.map(|c| !c.2).unwrap_or(true) {
+			if ctx.input(|i| i.pointer.any_pressed())
+				&& let Some(pp) = pos
+					&& !area.response.rect.contains(pp) && clicked.map(|c| !c.2).unwrap_or(true) {
 						close = true;
 					}
-				}
-			}
 			if close {
 				self.inline = None;
 			}
@@ -1618,12 +1626,11 @@ impl App {
 		}
 		let copy_req = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
 		let editing = ctx.memory(|m| m.focused().is_some());
-		if copy_req && !editing && self.inline.is_none() {
-			if let Some(r) = self.selected {
+		if copy_req && !editing && self.inline.is_none()
+			&& let Some(r) = self.selected {
 				let what = match self.click_col { 0 => 3, 1 => 1, _ => 2 };
 				self.copy(ctx, r, what);
 			}
-		}
 		if matches!(self.dialog, Dialog::None) && self.inline.is_none() && self.menu.is_none() && !self.hidden_open && !self.btn_open {
 			let (f5, find, tab1, tab2) = ctx.input_mut(|i| {
 				(
@@ -1633,7 +1640,7 @@ impl App {
 					i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num2),
 				)
 			});
-			if f5 && self.loading.is_none() && self.en_dir().is_dir() && self.ru_dir().is_dir() {
+			if f5 && self.loading.is_none() && self.can_load() {
 				self.start_load(ctx);
 			}
 			if find {
@@ -1713,7 +1720,11 @@ impl App {
 			y += 30.0 + 16.0;
 			self.result_row(ui, ctx, x0, w, y);
 			y += 26.0 + 10.0;
-			let trect = Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x0 + w, full.max.y - 22.0));
+			let mut trect = Rect::from_min_max(Pos2::new(x0, y), Pos2::new(x0 + w, full.max.y - 22.0));
+			if self.chars.open {
+				self.chars_panel(ui, ctx, Rect::from_min_max(trect.min, Pos2::new(trect.min.x + 300.0, trect.max.y)));
+				trect.min.x += 312.0;
+			}
 			self.table(ui, ctx, trect);
 		});
 		self.context_menu(ctx);
@@ -1753,16 +1764,10 @@ fn build_date() -> String {
 }
 
 fn display_name(p: &compare::Pair) -> String {
-	if compare::ed7().is_some() {
-		if let Some(n) = p.ru.as_ref().or(p.en.as_ref()).and_then(|s| s.path.file_name()) {
-			return n.to_string_lossy().to_string();
-		}
+	if let Some(n) = p.ru.as_ref().or(p.en.as_ref()).and_then(|s| s.path.file_name()) {
+		return n.to_string_lossy().to_string();
 	}
 	p.file.rsplit('/').next().unwrap_or(&p.file).to_string()
-}
-
-pub fn app_icon() -> egui::IconData {
-	icon_from(include_bytes!("icons/crossbell_compare.png"))
 }
 
 const TITLE_ED7_MAIN: &str = concat!("Translation compare (CrossbellCompare) ", env!("VER_CROSSBELLCOMPARE"), env!("VER_SUFFIX"), " — Trails from Zero / Trails to Azure");
@@ -1770,23 +1775,23 @@ const TITLE_ED7_MAIN: &str = concat!("Translation compare (CrossbellCompare) ", 
 pub fn run_ed7_main() {
 	struct Wrap {
 		app: App,
-		cache: (PathBuf, Option<crossbell_tool::scena::Title>),
+		cache: (PathBuf, Option<crossbell_tool::crossbell::scena::Title>),
 	}
 	impl eframe::App for Wrap {
 		fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
 			let en = self.app.en_path();
 			if self.cache.0 != en {
-				let t = crossbell_tool::scena::detect_title(&en).or_else(|| crossbell_tool::scena::detect_title(&self.app.ru_dir()));
+				let t = crossbell_tool::crossbell::scena::detect_title(&en).or_else(|| crossbell_tool::crossbell::scena::detect_title(&self.app.ru_dir()));
 				self.cache = (en, t);
 			}
-			compare::set_ed7(Some(self.cache.1.unwrap_or(crossbell_tool::scena::Title::Zero)));
+			compare::set_ed7(Some(self.cache.1.unwrap_or(crossbell_tool::crossbell::scena::Title::Zero)));
 			self.app.show(ctx);
 		}
 		fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
 			self.app.on_exit_save();
 		}
 	}
-	compare::set_ed7(Some(crossbell_tool::scena::Title::Zero));
+	compare::set_ed7(Some(crossbell_tool::crossbell::scena::Title::Zero));
 	let opts = eframe::NativeOptions {
 		viewport: egui::ViewportBuilder::default().with_title(TITLE_ED7_MAIN).with_inner_size([1180.0, 800.0]).with_min_inner_size([960.0, 600.0]).with_drag_and_drop(true).with_icon(icon_from(include_bytes!("icons/crossbell_compare.png"))),
 		centered: true,
@@ -1797,6 +1802,186 @@ pub fn run_ed7_main() {
 	}
 }
 
+#[derive(Default)]
+struct Chars {
+	open: bool,
+	q: String,
+	sel: Option<u32>,
+	list: Vec<CharRow>,
+	list_for: (usize, &'static str),
+	only_faces: bool,
+}
+
+struct CharRow {
+	id: u32,
+	ids: Vec<u32>,
+	lines: usize,
+	model: String,
+	name: String,
+	face: Option<(u32, String)>,
+	range: Vec<(u32, u32)>,
+}
+
+fn ed7_names() -> &'static Vec<(u32, u32, String, String)> {
+	static T: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, &'static Vec<(u32, u32, String, String)>>>> = std::sync::OnceLock::new();
+	let dir = if matches!(compare::ed7(), Some(crossbell_tool::crossbell::scena::Title::Azure)) { "Azure" } else { "Zero" };
+	let mut m = T.get_or_init(Default::default).lock().unwrap();
+	m.entry(dir).or_insert_with(|| {
+		let text = crate::crossbell_buttons::pack::get(&format!("{dir}/names.tsv")).map(|b| String::from_utf8_lossy(b).to_string()).unwrap_or_default();
+		let v = text
+			.lines()
+			.filter_map(|l| {
+				let c: Vec<&str> = l.split('\t').collect();
+				(c.len() == 3 || c.len() == 4).then(|| Some((c[0].parse().ok()?, c[1].parse().ok()?, c[2].to_string(), c.get(3).filter(|s| !s.trim().is_empty()).unwrap_or(&c[2]).to_string()))).flatten()
+			})
+			.collect();
+		Box::leak(Box::new(v))
+	})
+}
+
+fn ed7_who(code: u32) -> Option<u32> {
+	let name = &ed7_names().iter().find(|x| x.0 <= code && code <= x.1)?.2;
+	ed7_names().iter().find(|x| &x.2 == name).map(|x| x.0)
+}
+
+fn ed7_ranges(id: u32) -> Vec<(u32, u32)> {
+	let Some(name) = ed7_names().iter().find(|x| x.0 == id).map(|x| &x.2) else { return Vec::new() };
+	ed7_names().iter().filter(|x| &x.2 == name).map(|x| (x.0, x.1)).collect()
+}
+
+impl App {
+	fn chars_build(&mut self) {
+		let Some(d) = self.data.as_ref() else {
+			self.chars.list.clear();
+			return;
+		};
+		let dir = Self::face_pack();
+		if self.chars.list_for == (d.pairs.len(), dir) {
+			return;
+		}
+		let mut n: HashMap<u32, usize> = HashMap::new();
+		for p in &d.pairs {
+			if let Some(id) = Self::row_who(p) {
+				*n.entry(id).or_default() += 1;
+			}
+		}
+		let names = ed7_names();
+		let mut list: Vec<CharRow> = n
+			.into_iter()
+			.filter_map(|(id, lines)| {
+				let (a, _, key, game) = names.iter().find(|x| x.0 == id)?;
+				let codes = ed7_ranges(id).iter().map(|(a, b)| format!("ka{a:05}–ka{b:05}")).collect::<Vec<_>>().join(", ");
+				Some(CharRow { id, ids: vec![id], lines, model: format!("{key} · {codes}"), name: game.clone(), face: Some((*a, format!("ka{a:05}"))), range: ed7_ranges(id) })
+			})
+			.collect();
+		list.sort_by(|a, b| b.lines.cmp(&a.lines).then(a.id.cmp(&b.id)));
+		self.chars.list = list;
+		self.chars.list_for = (d.pairs.len(), dir);
+		self.chars.sel = None;
+	}
+	fn char_ids(&self, id: u32) -> Vec<u32> {
+		self.chars.list.iter().find(|r| r.id == id).map(|r| r.ids.clone()).unwrap_or_else(|| vec![id])
+	}
+
+	fn chars_select(&mut self, id: Option<u32>) {
+		self.chars.sel = id;
+		if !self.search.trim().is_empty() && self.data.is_some() && self.loading.is_none() {
+			self.do_search();
+			return;
+		}
+		let Some(d) = self.data.as_ref() else { return };
+		match id {
+			Some(id) => {
+				let ids = self.char_ids(id);
+				let all: Vec<usize> = (0..d.pairs.len()).filter(|&i| Self::row_who(&d.pairs[i]).is_some_and(|w| ids.contains(&w))).collect();
+				let name = self.chars.list.iter().find(|r| r.id == id).map(|r| r.name.clone()).unwrap_or_default();
+				let n = plural(all.len(), tr("реплика", "line"), tr("реплики", "lines"), tr("реплик", "lines"));
+				self.found = format!("{name}: {n}");
+				self.total = all.len();
+				self.rows = all;
+				self.searched = true;
+			}
+			None => {
+				self.rows.clear();
+				self.found.clear();
+				self.total = 0;
+				self.searched = false;
+			}
+		}
+		self.file_sel = 0;
+		self.chip = None;
+		self.selected = None;
+		self.inline = None;
+		self.scroll_top = true;
+		self.reset_layouts();
+	}
+
+	fn chars_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, rect: Rect) {
+		let p = self.pal;
+		self.chars_build();
+		ui.painter().rect(rect, 10, p.surface, Stroke::new(1.0, p.div), StrokeKind::Inside);
+		let inner = rect.shrink(10.0);
+		let sr = Rect::from_min_size(inner.min, Vec2::new(inner.width(), 32.0));
+		ui.painter().rect(sr, 8, p.bg, Stroke::new(1.0, p.div), StrokeKind::Inside);
+		let mut c = ui.new_child(egui::UiBuilder::new().max_rect(sr.shrink2(Vec2::new(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+		let hint = tr("Имя или код лица (ka00800)", "Name or face code (ka00800)");
+		c.add(egui::TextEdit::singleline(&mut self.chars.q).frame(false).font(f_body(13.0)).hint_text(egui::RichText::new(hint).color(p.muted)).desired_width(sr.width() - 20.0).margin(egui::Margin::ZERO));
+		let cr = Rect::from_min_size(Pos2::new(inner.min.x, sr.max.y + 6.0), Vec2::new(inner.width(), 22.0));
+		let mut cc = ui.new_child(egui::UiBuilder::new().max_rect(cr).layout(egui::Layout::left_to_right(egui::Align::Center)));
+		checkbox(&mut cc, &p, &mut self.chars.only_faces, tr("Только с портретом", "Only with a portrait"), 16.0, f_body(12.5));
+		let q = self.chars.q.trim().to_lowercase();
+		let code: Option<u32> = q.strip_prefix("ka").unwrap_or(&q).parse().ok();
+		let shown: Vec<usize> = (0..self.chars.list.len())
+			.filter(|&k| {
+				let r = &self.chars.list[k];
+				(!self.chars.only_faces || r.face.is_some())
+					&& (q.is_empty()
+					|| r.name.to_lowercase().contains(&q)
+					|| r.model.to_lowercase().contains(&q)
+					|| r.ids.iter().any(|i| i.to_string() == q)
+					|| r.face.as_ref().is_some_and(|f| f.1.to_lowercase().contains(&q))
+					|| code.is_some_and(|c| r.range.iter().any(|&(a, b)| a <= c && c <= b)))
+			})
+			.collect();
+		let tex: Vec<Option<egui::TextureHandle>> = shown.iter().map(|&k| self.chars.list[k].face.as_ref().map(|f| f.0)).collect::<Vec<_>>().into_iter().map(|c| c.and_then(|c| self.face(ctx, c))).collect();
+		let lr = Rect::from_min_max(Pos2::new(inner.min.x, cr.max.y + 6.0), inner.max);
+		let mut pick = None;
+		let mut lu = ui.new_child(egui::UiBuilder::new().max_rect(lr));
+		egui::ScrollArea::vertical().id_salt("chars_list").auto_shrink([false, false]).show(&mut lu, |ui| {
+			for (j, &k) in shown.iter().enumerate() {
+				let r = &self.chars.list[k];
+				let (row, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 74.0), Sense::click());
+				if self.chars.sel == Some(r.id) {
+					ui.painter().rect_filled(row, 6, p.sel);
+				} else if resp.hovered() {
+					ui.painter().rect_filled(row, 6, p.div2);
+				}
+				let fr = Rect::from_min_size(Pos2::new(row.min.x + 4.0, row.min.y + 5.0), Vec2::splat(64.0));
+				match &tex[j] {
+					Some(t) => {
+						ui.painter().image(t.id(), fr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+					}
+					None => {
+						ui.painter().rect(fr, 6, Color32::TRANSPARENT, Stroke::new(1.0, p.div), StrokeKind::Inside);
+					}
+				}
+				if tex[j].is_some() {
+					ui.painter().rect_stroke(fr, 4, Stroke::new(1.0, p.text.gamma_multiply(0.35)), StrokeKind::Inside);
+				}
+				let tx = fr.max.x + 8.0;
+				let tw = row.max.x - tx - 4.0;
+				paint_text_clipped(ui, Rect::from_min_size(Pos2::new(tx + 4.0, row.min.y + 13.0), Vec2::new(tw - 4.0, 22.0)), &r.name, f_body(17.0), p.text, Align2::LEFT_TOP);
+				paint_text_clipped(ui, Rect::from_min_size(Pos2::new(tx + 4.0, row.min.y + 38.0), Vec2::new(tw - 4.0, 18.0)), &plural(r.lines, tr("реплика", "line"), tr("реплики", "lines"), tr("реплик", "lines")), f_body(14.0), p.muted, Align2::LEFT_TOP);
+				if resp.clicked() {
+					pick = Some(r.id);
+				}
+			}
+		});
+		if let Some(id) = pick {
+			self.chars_select(if self.chars.sel == Some(id) { None } else { Some(id) });
+		}
+	}
+}
 
 fn read_set(path: &std::path::Path, lower: bool) -> HashSet<String> {
 	std::fs::read_to_string(path)
@@ -1982,26 +2167,26 @@ impl App {
 								let p = &d.pairs[k];
 								let me = k == it.pair;
 								let f = if me { &hit } else { &ctx_f };
-								ws.write_string_with_format(r, 0, &cut(&it.file), f)?;
+								ws.write_string_with_format(r, 0, cut(&it.file), f)?;
 								ws.write_number_with_format(r, 1, line_of(p) as f64, f)?;
 								ws.write_string_with_format(r, 2, if me { cut(&it.what) } else { String::new() }, f)?;
-								ws.write_string_with_format(r, 3, &cut(&raw(&p.en)), f)?;
-								ws.write_string_with_format(r, 4, &cut(&raw(&p.ru)), f)?;
+								ws.write_string_with_format(r, 3, cut(&raw(&p.en)), f)?;
+								ws.write_string_with_format(r, 4, cut(&raw(&p.ru)), f)?;
 								if me {
 									ws.write_number_with_format(r, 5, it.count as f64, f)?;
-									ws.write_string_with_format(r, 6, &cut(&it.files), f)?;
+									ws.write_string_with_format(r, 6, cut(&it.files), f)?;
 								}
 								r += 1;
 							}
 						}
 						None => {
-							ws.write_string_with_format(r, 0, &cut(&it.file), &hit)?;
+							ws.write_string_with_format(r, 0, cut(&it.file), &hit)?;
 							ws.write_number_with_format(r, 1, it.line as f64, &hit)?;
-							ws.write_string_with_format(r, 2, &cut(&it.what), &hit)?;
-							ws.write_string_with_format(r, 3, &cut(&it.en), &hit)?;
-							ws.write_string_with_format(r, 4, &cut(&it.ru), &hit)?;
+							ws.write_string_with_format(r, 2, cut(&it.what), &hit)?;
+							ws.write_string_with_format(r, 3, cut(&it.en), &hit)?;
+							ws.write_string_with_format(r, 4, cut(&it.ru), &hit)?;
 							ws.write_number_with_format(r, 5, it.count as f64, &hit)?;
-							ws.write_string_with_format(r, 6, &cut(&it.files), &hit)?;
+							ws.write_string_with_format(r, 6, cut(&it.files), &hit)?;
 							r += 1;
 						}
 					}
@@ -2356,21 +2541,19 @@ impl App {
 	}
 
 	fn buttons_window(&mut self, ctx: &egui::Context) {
-		use crate::kai_buttons::{self as kb, pad_table};
+		use crate::crossbell_buttons::{self as kb, pad_table};
 		let devs = kb::devices();
 		#[allow(non_snake_case)]
 		let DEVICES = devs;
 		let p = self.pal;
 		self.btn.ensure_loaded();
-		if self.btn_codes.is_none() {
-			if let Some(d) = self.data.as_ref() {
+		if self.btn_codes.is_none()
+			&& let Some(d) = self.data.as_ref() {
 				self.btn_codes = Some(kb::scan(d.pairs.iter().filter_map(|x| x.ru.as_ref().map(|s| s.text.clone()))));
 			}
-		}
 		let codes: Vec<(u32, usize, String)> = self.btn_codes.as_ref().map(|m| m.iter().map(|(k, v)| (*k, v.0, v.1.clone())).collect()).unwrap_or_default();
 		let actions: Vec<&(u32, usize, String)> = codes.iter().filter(|x| !kb::is_atlas(x.0)).collect();
 		let n_atlas = codes.iter().filter(|x| kb::is_atlas(x.0)).count();
-		let ed7 = compare::ed7().is_some();
 		if self.btn_sel.is_none() {
 			self.btn_sel = actions.first().map(|x| x.0);
 		}
@@ -2392,7 +2575,7 @@ impl App {
 			let x0 = rect.min.x + 22.0;
 			let iw = rect.width() - 44.0;
 			painter.text(Pos2::new(x0, rect.min.y + 26.0), Align2::LEFT_CENTER, tr("Значки в русском тексте", "Icons in the Russian text"), f_semi(18.0), p.text);
-			painter.text(Pos2::new(x0, rect.min.y + 50.0), Align2::LEFT_CENTER, if ed7 { tr("Коды #…I и #…M показываются картинками из текстур игры — только здесь, в Сверке (английский и русский столбцы). В файлы перевода ничего не пишется.", "#…I and #…M codes are shown as images from the game's textures, only here in Compare (English and Russian columns). Nothing is written to the translation files.") } else { tr("Коды <I…> показываются картинками из текстур игры — только здесь, в Сверке (английский и русский столбцы). В файлы перевода ничего не пишется.", "<I…> codes are shown as images from the game's textures, only here in Compare (English and Russian columns). Nothing is written to the translation files.") }, f_body(12.5), p.muted);
+			painter.text(Pos2::new(x0, rect.min.y + 50.0), Align2::LEFT_CENTER, tr("Коды #…I и #…M показываются картинками из текстур игры — только здесь, в Сверке (английский и русский столбцы). В файлы перевода ничего не пишется.", "#…I and #…M codes are shown as images from the game's textures, only here in Compare (English and Russian columns). Nothing is written to the translation files."), f_body(12.5), p.muted);
 			let mut y = rect.min.y + 70.0;
 			{
 				let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, y), Vec2::new(iw, 30.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
@@ -2401,13 +2584,19 @@ impl App {
 					self.btn.on = on;
 					changed = true;
 				}
+				r.add_space(24.0);
+				let mut faces = self.show_faces;
+				if checkbox(&mut r, &p, &mut faces, tr("Показывать портреты в тексте", "Show portraits in the text"), 16.0, f_body(13.5)).on_hover_text(tr("Портрет говорящего в столбце «Файл»", "The speaker's portrait in the File column")).changed() {
+					self.show_faces = faces;
+					changed = true;
+				}
 			}
 			y += 38.0;
 			{
 				painter.galley(Pos2::new(x0, y), ui.fonts(|f| f.layout_job(caps_job(tr("Значки и кнопки какой игры показывать", "Which game's icons and buttons to show"), p.muted))), p.muted);
 				y += 20.0;
 				let gap = 12.0;
-				let games: &[(&str, &str)] = if ed7 { &crate::kai_buttons::ED7_GAMES } else { &crate::kai_buttons::KAI_GAMES };
+				let games: &[(&str, &str)] = &crate::crossbell_buttons::ED7_GAMES;
 				let cw = (iw - gap * (games.len() as f32 - 1.0)) / games.len() as f32;
 				let ch = 54.0;
 				for (gi, (name, key)) in games.iter().enumerate() {
@@ -2440,7 +2629,7 @@ impl App {
 				r.label(egui::RichText::new(tr("Устройство", "Device")).font(f_body(13.0)).color(p.muted));
 				r.add_space(10.0);
 				let mut dev = self.btn.device;
-				let tips = if compare::ed7().is_some() { ["", "", "", tr("набор с кнопкой «•••»", "the set with the '•••' button"), tr("кнопки DualSense (buttons_ps5)", "DualSense buttons (buttons_ps5)"), tr("клавиши и мышь назначаются отдельно от геймпада", "keys and mouse are assigned separately from the gamepad")] } else { ["", "", "", tr("набор с кнопкой «•••»", "the set with the '•••' button"), tr("набор Stadia: кнопки L1/R1 прямоугольной формы", "Stadia set: rectangular L1/R1 buttons"), tr("клавиши назначаются отдельно от геймпада", "keys are assigned separately from the gamepad")] };
+				let tips = ["", "", "", tr("набор с кнопкой «•••»", "the set with the '•••' button"), tr("кнопки DualSense (buttons_ps5)", "DualSense buttons (buttons_ps5)"), tr("клавиши и мышь назначаются отдельно от геймпада", "keys and mouse are assigned separately from the gamepad")];
 				if segmented(&mut r, &p, "btn_dev", &DEVICES, &mut dev, None, 30.0, 7, f_body(13.0), &tips) {
 					self.btn.device = dev;
 					self.btn.changed();
@@ -2448,7 +2637,7 @@ impl App {
 				}
 			}
 			y += 42.0;
-			painter.text(Pos2::new(x0, y + 8.0), Align2::LEFT_CENTER, if ed7 { lformat!("Значков c_icon1 и предметов в тексте: {} — показываются сами. Ниже кнопки (#160I и выше): взяты с экрана настроек игры, остальные назначьте.", "c_icon1 and item icons in the text: {}, shown on their own. Buttons below (#160I and up): taken from the game's settings screen, assign the rest.", n_atlas) } else { lformat!("Значков icons.png в тексте: {} — показываются сами. Ниже коды действий 900+: часть кнопок взята из файлов игры, остальные назначьте.", "icons.png icons in the text: {}, shown on their own. Action codes 900+ below: some buttons come from the game's files, assign the rest.", n_atlas) }, f_body(12.5), p.text);
+			painter.text(Pos2::new(x0, y + 8.0), Align2::LEFT_CENTER, lformat!("Значков c_icon1 и предметов в тексте: {} — показываются сами. Ниже кнопки (#160I и выше): взяты с экрана настроек игры, остальные назначьте.", "c_icon1 and item icons in the text: {}, shown on their own. Buttons below (#160I and up): taken from the game's settings screen, assign the rest.", n_atlas), f_body(12.5), p.text);
 			y += 24.0;
 			let pal_h = 150.0;
 			let list_rect = Rect::from_min_max(Pos2::new(rect.min.x + 12.0, y), Pos2::new(rect.max.x - 12.0, rect.max.y - 62.0 - pal_h));
@@ -2496,7 +2685,7 @@ impl App {
 				self.btn_sel = Some(n);
 			}
 			if actions.is_empty() {
-				painter.text(list_rect.center(), Align2::CENTER_CENTER, if self.data.is_some() { if ed7 { tr("В русском тексте нет кнопок #160I+", "The Russian text has no #160I+ buttons") } else { tr("В русском тексте нет кодов 900+", "The Russian text has no 900+ codes") } } else { tr("Загрузите файлы — тогда здесь появятся коды из текста", "Load the files and the text's codes will appear here") }, f_body(13.0), p.muted);
+				painter.text(list_rect.center(), Align2::CENTER_CENTER, if self.data.is_some() { tr("В русском тексте нет кнопок #160I+", "The Russian text has no #160I+ buttons") } else { tr("Загрузите файлы — тогда здесь появятся коды из текста", "Load the files and the text's codes will appear here") }, f_body(13.0), p.muted);
 			}
 			let py = rect.max.y - 58.0 - pal_h;
 			painter.line_segment([Pos2::new(rect.min.x + 1.0, py), Pos2::new(rect.max.x - 1.0, py)], Stroke::new(1.0, p.div));
@@ -2522,7 +2711,7 @@ impl App {
 					ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
 					for (key, val) in &items {
 						let (r, resp) = ui.allocate_exact_size(Vec2::new(cw, if self.btn.device < 5 { 56.0 } else { 46.0 }), Sense::click());
-						let cur = sel.map(|n| if self.btn.device < 5 { self.btn.pad_of(n) } else { self.btn.kb_of(n) }).flatten().map(|c| kb::split_combo(&c).contains(val)).unwrap_or(false);
+						let cur = sel.and_then(|n| if self.btn.device < 5 { self.btn.pad_of(n) } else { self.btn.kb_of(n) }).map(|c| kb::split_combo(&c).contains(val)).unwrap_or(false);
 						if cur {
 							ui.painter().rect(r, 7, p.sel, Stroke::new(1.0, p.accent), StrokeKind::Inside);
 						} else if resp.hovered() {
@@ -2541,9 +2730,8 @@ impl App {
 							paint_text_clipped(ui, Rect::from_min_size(Pos2::new(r.min.x, r.max.y - 16.0), Vec2::new(cw, 14.0)), lab, f_body(10.5), p.muted, Align2::CENTER_CENTER);
 						}
 						let resp = resp.on_hover_text(val.as_str());
-						if resp.clicked() && sel.is_some() {
+						if let (true, Some(n)) = (resp.clicked(), sel) {
 							let add = ui.input(|i| i.modifiers.ctrl || i.modifiers.shift);
-							let n = sel.unwrap();
 							let now = if self.btn.device < 5 { self.btn.pad_of(n) } else { self.btn.kb_of(n) };
 							chosen = Some(match (add, now) {
 								(true, Some(c)) => {
@@ -2580,8 +2768,8 @@ impl App {
 				close = true;
 			}
 			let can_clear = sel.map(|n| if self.btn.device < 5 { self.btn.pad.contains_key(&n) } else { self.btn.kb.contains_key(&n) }).unwrap_or(false);
-			if small_button(&mut fu, &p, tr("Убрать своё назначение", "Remove my assignment"), Some("eraser"), 34.0, can_clear, p.text).clicked() {
-				if let Some(n) = sel {
+			if small_button(&mut fu, &p, tr("Убрать своё назначение", "Remove my assignment"), Some("eraser"), 34.0, can_clear, p.text).clicked()
+				&& let Some(n) = sel {
 					if self.btn.device < 5 {
 						self.btn.pad.remove(&n);
 					} else {
@@ -2591,7 +2779,6 @@ impl App {
 					self.btn.changed();
 					changed = true;
 				}
-			}
 			let mut lu = ui.new_child(egui::UiBuilder::new().max_rect(fr).layout(egui::Layout::left_to_right(egui::Align::Center)));
 			lu.label(egui::RichText::new(lformat!("Назначения хранятся в {} рядом с программой.", "Assignments are stored in {} next to the program.", kb::map_file())).font(f_body(11.5)).color(p.muted));
 		});
@@ -2733,13 +2920,12 @@ fn vbar(ui: &egui::Ui, p: &Pal, id: &'static str, track: Rect, offset: f32, cont
 			let y = (pp.y - grab - track.min.y).clamp(0.0, free);
 			new = Some(y / free * max_off);
 		}
-	} else if resp.dragged() {
-		if let Some(pp) = resp.interact_pointer_pos() {
+	} else if resp.dragged()
+		&& let Some(pp) = resp.interact_pointer_pos() {
 			let grab: f32 = ui.ctx().data(|d| d.get_temp(grab_id)).unwrap_or(hh / 2.0);
 			let y = (pp.y - grab - track.min.y).clamp(0.0, free);
 			new = Some(y / free * max_off);
 		}
-	}
 	let hot = resp.hovered() || resp.dragged();
 	let painter = ui.painter();
 	painter.rect(track, 6, p.div2.gamma_multiply(0.6), Stroke::new(1.0, p.div), StrokeKind::Inside);

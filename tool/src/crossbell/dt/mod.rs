@@ -36,7 +36,7 @@ pub fn decompile(data: &[u8], stem: &str, file_name: &str) -> Result<(String, us
 }
 
 pub fn compile(src: &str) -> Result<Vec<u8>, String> {
-	let src = crate::text::normalize(src);
+	let src = crate::crossbell::text::normalize(src);
 	let doc = Doc::from_text(&src)?;
 	doc.build()
 }
@@ -79,7 +79,7 @@ pub fn compile_xlsx_checked(book: &[u8], orig: &[u8], stem: &str) -> Result<(Vec
 			let restore = match (&od.items[i], &doc.items[i]) {
 				(Item::Str { .. }, Item::Str { .. }) => {
 					let ot = od.item_text(i).unwrap_or_default();
-					let r = crate::kai::compare::identifier(ot.trim()) && doc.item_text(i).as_deref() != Some(ot.as_str());
+					let r = crate::crossbell::compare::identifier(ot.trim()) && doc.item_text(i).as_deref() != Some(ot.as_str());
 					if r {
 						fixed.push(format!("«{}» (s{i})", ot.trim()));
 					}
@@ -104,11 +104,10 @@ fn keyed(doc: &Doc) -> Vec<(String, String, String)> {
 			let mut pi = 0usize;
 			for t in toks {
 				if let Tok::Ptr { target, .. } = t {
-					if let Some(slot) = refkey.get_mut(*target) {
-						if slot.is_none() {
+					if let Some(slot) = refkey.get_mut(*target)
+						&& slot.is_none() {
 							*slot = Some(format!("d{di}.{pi}"));
 						}
-					}
 					pi += 1;
 				}
 			}

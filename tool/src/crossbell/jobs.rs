@@ -2,13 +2,13 @@
 use crate::{leprintln, lformat, lprintln};
 #[allow(unused_imports)]
 use crate::lang::tr;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::scena::Title;
-use crate::{dt, itp, scena, scena_json};
+use crate::crossbell::scena::Title;
+use crate::crossbell::{dt, itp, scena, scena_json};
 
 pub const MANIFEST: &str = ".kiseki_manifest.tsv";
 
@@ -24,6 +24,7 @@ pub struct Options {
 	pub tables: bool,
 	pub textures: bool,
 	pub other: bool,
+	pub keep_failed: bool,
 	pub tex_dds: bool,
 	pub check: bool,
 	pub mask: String,
@@ -53,6 +54,27 @@ impl Kind {
 			Kind::Other => tr("прочие файлы (как есть)", "other files (as they are)"),
 			Kind::Sprite => tr("спрайты .itc", ".itc sprites"),
 		}
+	}
+}
+
+const GAME_MARK: &str = ".kiseki_game.txt";
+
+pub fn project_game(proj: &Path) -> Option<Title> {
+	let s = std::fs::read_to_string(proj.join(GAME_MARK)).ok()?;
+	[Title::Zero, Title::Azure].into_iter().find(|t| t.key() == s.trim())
+}
+
+fn project_mismatch(o: &Options) -> Option<String> {
+	let pg = project_game(&o.proj_dir).filter(|&pg| pg != o.title)?;
+	Some(lformat!("Папка проекта {} — для игры {}, а сейчас выбрана {}. Укажите для этой игры другую папку проекта.", "The project folder {} is for {}, but {} is selected now. Choose another project folder for this game.", o.proj_dir.display(), pg.label(), o.title.label()))
+}
+
+fn unpack_factor(k: Kind) -> f64 {
+	match k {
+		Kind::Scena => 4.3,
+		Kind::Table => 1.3,
+		Kind::Texture | Kind::Sprite => 1.5,
+		Kind::Other => 1.0,
 	}
 }
 
@@ -137,16 +159,14 @@ fn is_in_scena_dir(rel: &Path, base: &Path) -> bool {
 fn data_rel(f: &Path, game_dir: &Path) -> PathBuf {
 	let rel = f.strip_prefix(game_dir).unwrap_or(f).to_path_buf();
 	let comps: Vec<_> = rel.components().collect();
-	if comps.len() >= 2 {
-		if let Some(pos) = comps[..comps.len() - 1].iter().rposition(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("data")) {
+	if comps.len() >= 2
+		&& let Some(pos) = comps[..comps.len() - 1].iter().rposition(|c| c.as_os_str().to_string_lossy().eq_ignore_ascii_case("data")) {
 			return comps[pos + 1..].iter().collect();
 		}
-	}
-	if rel.parent().map(|p| p.as_os_str().is_empty()).unwrap_or(true) {
-		if let Some(n) = game_dir.file_name() {
+	if rel.parent().map(|p| p.as_os_str().is_empty()).unwrap_or(true)
+		&& let Some(n) = game_dir.file_name() {
 			return Path::new(n).join(rel);
 		}
-	}
 	rel
 }
 
@@ -156,11 +176,10 @@ fn game_file(o: &Options, rel: &Path) -> Option<PathBuf> {
 		return None;
 	}
 	let mut c = vec![g.join(rel), g.join("data").join(rel)];
-	if let (Some(first), Some(parent)) = (rel.components().next(), g.parent()) {
-		if g.file_name().map(|n| n.eq_ignore_ascii_case(first.as_os_str())).unwrap_or(false) {
+	if let (Some(first), Some(parent)) = (rel.components().next(), g.parent())
+		&& g.file_name().map(|n| n.eq_ignore_ascii_case(first.as_os_str())).unwrap_or(false) {
 			c.push(parent.join(rel));
 		}
-	}
 	c.into_iter().find(|p| p.is_file())
 }
 
@@ -181,11 +200,10 @@ impl Manifest {
 		if let Ok(s) = std::fs::read_to_string(dir.join(MANIFEST)) {
 			for line in s.lines() {
 				let mut it = line.split('\t');
-				if let (Some(p), Some(h)) = (it.next(), it.next()) {
-					if let Ok(h) = u64::from_str_radix(h, 16) {
+				if let (Some(p), Some(h)) = (it.next(), it.next())
+					&& let Ok(h) = u64::from_str_radix(h, 16) {
 						m.map.insert(p.to_string(), (h, it.next().unwrap_or("").to_string()));
 					}
-				}
 			}
 		}
 		m
@@ -221,12 +239,13 @@ where
 	let next = AtomicUsize::new(0);
 	let done = AtomicUsize::new(0);
 	let summary = Mutex::new(Summary::default());
+	let full = std::sync::atomic::AtomicBool::new(false);
 	let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 8);
 	sink.progress(0, total);
 	std::thread::scope(|s| {
 		for _ in 0..threads {
 			s.spawn(|| loop {
-				if sink.cancelled() { break }
+				if sink.cancelled() || full.load(Ordering::SeqCst) { break }
 				let i = next.fetch_add(1, Ordering::SeqCst);
 				let Some(t) = tasks.get(i) else { break };
 				let name = rel_key(&t.rel);
@@ -240,6 +259,13 @@ where
 						Outcome::Ok(Some(w)) => { sm.ok += 1; sm.warnings += 1; sink.log(&format!("⚠ {name}: {w}")) }
 						Outcome::Skip(Some(r)) => { sm.skipped += 1; sink.log(&format!("— {name}: {r}")) }
 						Outcome::Skip(None) => sm.skipped += 1,
+						Outcome::Fail(e) if disk_full(e) => {
+							sm.failed += 1;
+							if !full.swap(true, Ordering::SeqCst) {
+								sink.log(tr("✖ ДИСК ЗАПОЛНЕН — работа остановлена. Освободите место или выберите папку на другом диске и запустите снова", "✖ DISK FULL: work stopped. Free some space or choose a folder on another disk and run again"));
+								sink.log(tr("  (уже готовые файлы останутся, повторный запуск продолжит с того же места).", "  (finished files stay, a new run continues from the same place)."));
+							}
+						}
 						Outcome::Fail(e) => { sm.failed += 1; sink.log(&format!("✖ {name}: {e}")) }
 					}
 				}
@@ -275,7 +301,8 @@ fn kinds_enabled(o: &Options) -> Vec<Kind> {
 	if o.scena { v.push(Kind::Scena) }
 	if o.tables { v.push(Kind::Table) }
 	if o.textures { v.push(Kind::Texture) }
-	if o.other { v.push(Kind::Other); v.push(Kind::Sprite) }
+	if o.other { v.push(Kind::Other) }
+	if o.other || o.textures { v.push(Kind::Sprite) }
 	v
 }
 
@@ -302,6 +329,11 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		sink.log(&lformat!("Не удалось создать папку проекта: {e}", "Could not create the project folder: {e}"));
 		return Summary::default();
 	}
+	if let Some(m) = project_mismatch(o) {
+		sink.log(&format!("✖ {m}"));
+		return Summary { failed: 1, ..Summary::default() };
+	}
+	let _ = std::fs::write(o.proj_dir.join(GAME_MARK), o.title.key());
 
 	let mut files = Vec::new();
 	walk(&o.game_dir, &mut files);
@@ -366,9 +398,19 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		return Summary::default();
 	}
 
+	if let Some(free) = free_space(&o.proj_dir) {
+		let need: u64 = tasks.iter().map(|t| (std::fs::metadata(&t.src).map(|m| m.len()).unwrap_or(0) as f64 * unpack_factor(t.kind)) as u64).sum();
+		if need > free {
+			sink.log(&lformat!("⚠ Может не хватить места: нужно примерно {:.1} ГБ, свободно {:.1} ГБ.", "⚠ There may not be enough space: about {:.1} GB needed, {:.1} GB free.", need as f64 / 1073741824.0, free as f64 / 1073741824.0));
+		}
+	}
 	let manifest = Mutex::new(Manifest::load(&o.proj_dir));
+	let layout = Layout::new(&o.proj_dir);
+	if layout.sections {
+		sink.log(tr("  в проекте есть папки разделов — файлы кладутся в них", "  the project has section folders: files go into them"));
+	}
 	let summary = run_parallel(tasks, sink, |t| {
-		let dst = o.proj_dir.join(&t.rel);
+		let dst = layout.path(&t.rel);
 		let key = rel_key(&t.rel);
 		let edited = |dst: &Path, key: &str| -> Option<Outcome> {
 			if !dst.exists() || o.overwrite_edited {
@@ -390,7 +432,7 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 		}
 		let as_is = |warn: Option<String>| -> Outcome {
 			let raw = t.rel.with_file_name(file_name(&t.src));
-			let (dst, key) = (o.proj_dir.join(&raw), rel_key(&raw));
+			let (dst, key) = (layout.path(&raw), rel_key(&raw));
 			if let Some(r) = edited(&dst, &key) {
 				return r;
 			}
@@ -400,6 +442,7 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 			manifest.lock().unwrap().map.insert(key, (fnv(&data), RAW.into()));
 			Outcome::Ok(warn)
 		};
+		let failed = |what: String| -> Outcome { if o.keep_failed { as_is(Some(lformat!("{what}, в проекте как есть", "{what}, copied to the project as it is"))) } else { Outcome::Skip(Some(lformat!("{what} — пропущен", "{what}: skipped"))) } };
 		let (bytes_written, meta, warn): (Vec<u8>, String, Option<String>) = match t.kind {
 			Kind::Scena => match scena::decompile_json(o.title, &data) {
 				Ok((text, warn)) => {
@@ -407,7 +450,7 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 					if let Err(e) = write_atomic(&dst, &bytes) { return Outcome::Fail(e.to_string()) }
 					(bytes, "scena".into(), warn)
 				}
-				Err(e) => return Outcome::Fail(e),
+				Err(e) => return failed(lformat!("сцена не разобралась: {e}", "scene not unpacked: {e}")),
 			},
 			Kind::Table => match dt::decompile_xlsx(&data, &stem_of(&file_name(&t.src)), &file_name(&t.src)) {
 				Ok((book, _n)) => {
@@ -416,7 +459,7 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 					}
 					(book, "table".into(), None)
 				}
-				Err(e) => return as_is(Some(lformat!("таблица не разобралась, в проекте как есть: {e}", "couldn't decompile the table, it stays in the project as is: {e}"))),
+				Err(e) => return failed(lformat!("таблица не разобралась: {e}", "table not unpacked: {e}")),
 			},
 			Kind::Texture => match if o.tex_dds { itp::to_dds(&data) } else { itp::decompile(&data) } {
 				Ok(dec) => {
@@ -426,17 +469,17 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 				}
 				Err(e) if e.contains(tr("палитр", "palette")) => {
 					PALETTE_SKIPPED.fetch_add(1, Ordering::Relaxed);
-					return as_is(None);
+					return if o.other { as_is(None) } else { Outcome::Skip(None) };
 				}
-				Err(e) => return as_is(Some(lformat!("текстура не разобралась, в проекте как есть: {e}", "couldn't decompile the texture, it stays in the project as is: {e}"))),
+				Err(e) => return failed(lformat!("текстура не разобралась: {e}", "texture not unpacked: {e}")),
 			},
 			Kind::Other => return as_is(None),
 			Kind::Sprite => {
 				let frames = match itp::itc_decode(&data) {
 					Ok(f) => f,
-					Err(e) => return as_is(Some(lformat!("спрайт не разобрался, в проекте как есть: {e}", "couldn't decompile the sprite, it stays in the project as is: {e}"))),
+					Err(e) => return failed(lformat!("спрайт не разобрался: {e}", "sprite not unpacked: {e}")),
 				};
-				let names: Vec<(PathBuf, String)> = (0..frames.len()).map(|i| { let r = t.rel.join(format!("{i:03}.png")); (o.proj_dir.join(&r), rel_key(&r)) }).collect();
+				let names: Vec<(PathBuf, String)> = (0..frames.len()).map(|i| { let r = t.rel.join(format!("{i:03}.png")); (layout.path(&r), rel_key(&r)) }).collect();
 				for (p, k) in &names {
 					if let Some(r) = edited(p, k) {
 						return r;
@@ -470,7 +513,7 @@ pub fn decompile(o: &Options, sink: &dyn Sink) -> Summary {
 	manifest.into_inner().unwrap().save(&o.proj_dir);
 	let pal = PALETTE_SKIPPED.swap(0, Ordering::Relaxed);
 	if pal > 0 {
-		sink.log(&lformat!("  текстуры старого формата (с палитрой) — в проект как есть: {pal}; это модели, карты и монстры, текста в них нет", "  old format textures (with a palette), copied to the project as is: {pal}; these are models, maps and monsters, with no text"));
+		sink.log(&lformat!("  текстуры старого формата (с палитрой): {pal} — {}; это модели, карты и монстры, текста в них нет", "  old-format textures (with a palette): {pal}: {}; these are models, maps and monsters, they have no text", if o.other { tr("в проект как есть", "copied to the project as they are") } else { tr("не разбирались (файлы без перевода)", "not unpacked (files without text)") }));
 	}
 	report(sink, tr("декомпиляция", "decompile"), &summary);
 	summary
@@ -486,7 +529,12 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 		sink.log(&lformat!("Папка проекта не найдена: {}", "Project folder not found: {}", o.proj_dir.display()));
 		return Summary::default();
 	}
+	if let Some(m) = project_mismatch(o) {
+		sink.log(&format!("✖ {m}"));
+		return Summary { failed: 1, ..Summary::default() };
+	}
 	let manifest = Manifest::load(&o.proj_dir);
+	let layout = Layout::new(&o.proj_dir);
 
 	let mut files = Vec::new();
 	walk(&o.proj_dir, &mut files);
@@ -496,16 +544,16 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 	for f in files {
 		let name = file_name(&f);
 		let lname = name.to_lowercase();
-		let Ok(rel) = f.strip_prefix(&o.proj_dir) else { continue };
+		let rel_buf = layout.logical(&f);
+		let rel = rel_buf.as_path();
 		let stem = stem_of(&name);
 		if name.starts_with("~$") || name.starts_with('.') {
 			continue;
 		}
-		if let Some(only) = &o.build_only {
-			if !top_dir(&f, &o.proj_dir).map(|t| only.contains(&t)).unwrap_or(false) {
+		if let Some(only) = &o.build_only
+			&& !top_dir(rel, Path::new("")).map(|t| only.contains(&t)).unwrap_or(false) {
 				continue;
 			}
-		}
 		if let Some(dir) = rel.parent().filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("itc"))) {
 			if mask_match(&o.mask, &stem_of(&file_name(dir))) && manifest.map.get(&rel_key(rel)).is_some_and(|(h, _)| std::fs::read(&f).map(|d| fnv(&d)).ok() != Some(*h)) {
 				sprites.insert(dir.to_path_buf(), ());
@@ -546,14 +594,12 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 			continue;
 		}
 		let key = rel_key(rel);
-		if o.only_changed {
-			if let Some((h, _)) = manifest.map.get(&key) {
-				if std::fs::read(&f).map(|d| fnv(&d)).ok() == Some(*h) {
+		if o.only_changed
+			&& let Some((h, _)) = manifest.map.get(&key)
+				&& std::fs::read(&f).map(|d| fnv(&d)).ok() == Some(*h) {
 					unchanged += 1;
 					continue;
 				}
-			}
-		}
 		let ext = match kind {
 			Kind::Scena => "bin",
 			Kind::Table if stem.to_lowercase().starts_with("monsnote") => "dt2",
@@ -566,7 +612,7 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 	}
 
 	for dir in sprites.into_keys() {
-		tasks.push(Task { kind: Kind::Sprite, src: o.proj_dir.join(&dir), rel: dir });
+		tasks.push(Task { kind: Kind::Sprite, src: layout.path(&dir), rel: dir });
 	}
 	sink.log(&lformat!("Сборка: {} → {}", "Building: {} → {}", o.proj_dir.display(), o.out_dir.display()));
 	if let Some(only) = &o.build_only {
@@ -583,21 +629,28 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 		return Summary::default();
 	}
 	if o.check {
-		crate::kai::compare::set_ed7(Some(o.title));
+		crate::crossbell::compare::set_ed7(Some(o.title));
 		let list: Vec<(String, PathBuf, PathBuf)> = tasks
 			.iter()
 			.filter(|t| matches!(t.kind, Kind::Scena | Kind::Table))
-			.filter_map(|t| game_file(o, &t.rel).map(|en| (rel_key(t.src.strip_prefix(&o.proj_dir).unwrap_or(&t.src)), en, t.src.clone())))
+			.filter_map(|t| game_file(o, &t.rel).map(|en| (rel_key(&layout.logical(&t.src)), en, t.src.clone())))
 			.collect();
-		let found = if list.is_empty() { Vec::new() } else { crate::kai::compare::check_files(&list) };
+		let found = if list.is_empty() { Vec::new() } else { crate::crossbell::compare::check_files(&list) };
 		if !found.is_empty() {
-			crate::kai::jobs::log_check(sink, &found);
+			log_check(sink, &found);
 			return Summary { check: found, ..Summary::default() };
 		}
 	}
 	if let Err(e) = std::fs::create_dir_all(&o.out_dir) {
 		sink.log(&lformat!("Не удалось создать папку для результата: {e}", "Could not create the output folder: {e}"));
 		return Summary::default();
+	}
+	if let Some(free) = free_space(&o.out_dir) {
+		let need: u64 = tasks.iter().map(|t| (std::fs::metadata(&t.src).map(|m| m.len()).unwrap_or(0) as f64 / unpack_factor(t.kind)) as u64).sum();
+		if free < need + (need >> 5) {
+			sink.log(&lformat!("✖ НЕ ХВАТИТ МЕСТА: собранные файлы займут примерно {:.1} ГБ, а на диске папки для собранного свободно {:.1} ГБ. Сборка не начиналась — освободите место или выберите другую папку.", "✖ NOT ENOUGH SPACE: the built files will take about {:.1} GB, but the disk of the output folder has {:.1} GB free. The build did not start. Free some space or choose another folder.", need as f64 / 1073741824.0, free as f64 / 1073741824.0));
+			return Summary { failed: 1, ..Summary::default() };
+		}
 	}
 
 	let summary = run_parallel(tasks, sink, |t| {
@@ -636,7 +689,7 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 			}
 			Kind::Texture => {
 				let png = match std::fs::read(&t.src) { Ok(d) => d, Err(e) => return Outcome::Fail(e.to_string()) };
-				let key = rel_key(&t.src.strip_prefix(&o.proj_dir).unwrap_or(&t.src));
+				let key = rel_key(&layout.logical(&t.src));
 				let meta = manifest.map.get(&key).map(|a| a.1.clone()).unwrap_or_default();
 				let mips = meta_get(&meta, "mips").unwrap_or(0);
 				let expect = meta_get(&meta, "w").zip(meta_get(&meta, "h"));
@@ -660,7 +713,7 @@ pub fn compile(o: &Options, sink: &dyn Sink) -> Summary {
 						break;
 					}
 					let Some(i) = meta_get(meta, "i") else { continue };
-					let png = match std::fs::read(o.proj_dir.join(key)) {
+					let png = match std::fs::read(layout.path(Path::new(key))) {
 						Ok(d) => d,
 						Err(e) => return Outcome::Fail(lformat!("не удалось прочитать кадр {key}: {e}", "can't read frame {key}: {e}")),
 					};
@@ -710,11 +763,97 @@ pub struct Ed7Folder {
 	pub scenes: usize,
 	pub tables: usize,
 	pub textures: usize,
+	pub sprites: usize,
+	pub dt2: usize,
+	pub tables_us: usize,
 	pub others: usize,
 	pub size: u64,
 	pub unpacked: u64,
 	pub out_size: u64,
 	pub changed: usize,
+}
+
+pub const SECTIONS: [&str; 12] = [
+	"Text for translation",
+	"Interface and menus",
+	"Mini-games and notes",
+	"Pictures",
+	"Portraits",
+	"Battle and effects",
+	"Characters and monsters",
+	"Maps",
+	"Voices",
+	"Music and sounds",
+	"Video",
+	"Other",
+];
+
+pub fn section_of(folder: &str) -> usize {
+	match folder.to_lowercase().trim_end_matches("_us") {
+		"scena" | "text" | "story" | "monsnote" => 0,
+		"system" | "visual" | "campimg" | "etc" | "savefile" | "cursors" | "icon" | "ss" | "localization" => 1,
+		"minigame" | "cooking" | "fishnote" | "friend" => 2,
+		"extra" => 3,
+		"face" => 4,
+		"battle" | "effect" => 5,
+		"chr" | "apl" | "monster" => 6,
+		"map" | "map_textures" | "map_textures_original" | "ent" | "ops" | "pme" => 7,
+		"voice" => 8,
+		"bgm" | "se" => 9,
+		"movie" => 10,
+		_ => 11,
+	}
+}
+
+pub fn uses_sections(proj: &Path) -> bool {
+	SECTIONS.iter().any(|s| proj.join(s).is_dir())
+}
+
+pub struct Layout {
+	pub proj: PathBuf,
+	pub sections: bool,
+}
+
+impl Layout {
+	pub fn new(proj: &Path) -> Layout {
+		Layout { proj: proj.to_path_buf(), sections: SECTIONS.iter().any(|s| proj.join(s).is_dir()) }
+	}
+
+	pub fn path(&self, rel: &Path) -> PathBuf {
+		if !self.sections {
+			return self.proj.join(rel);
+		}
+		let Some(first) = rel.components().next().map(|c| c.as_os_str().to_string_lossy().to_string()) else { return self.proj.join(rel) };
+		if let Some(s) = SECTIONS.iter().find(|s| self.proj.join(s).join(&first).exists()) {
+			return self.proj.join(s).join(rel);
+		}
+		if self.proj.join(&first).exists() {
+			return self.proj.join(rel);
+		}
+		self.proj.join(SECTIONS[section_of(&first)]).join(rel)
+	}
+
+	pub fn logical(&self, f: &Path) -> PathBuf {
+		let rel = f.strip_prefix(&self.proj).unwrap_or(f);
+		if self.sections
+			&& let Some(first) = rel.components().next()
+			&& SECTIONS.iter().any(|s| first.as_os_str() == *s) {
+				return rel.strip_prefix(first.as_os_str()).unwrap_or(rel).to_path_buf();
+			}
+		rel.to_path_buf()
+	}
+
+	pub fn folders(&self) -> Vec<PathBuf> {
+		let mut v = Vec::new();
+		for d in subdirs(&self.proj) {
+			if self.sections && SECTIONS.iter().any(|s| file_name(&d) == *s) {
+				v.extend(subdirs(&d));
+			} else {
+				v.push(d);
+			}
+		}
+		v
+	}
 }
 
 fn subdirs(dir: &Path) -> Vec<PathBuf> {
@@ -737,12 +876,18 @@ pub fn scan_game_ed7(data: &Path) -> Vec<Ed7Folder> {
 		let mut f = Ed7Folder { key: name.to_lowercase(), name: name.clone(), ..Default::default() };
 		for p in files {
 			let l = file_name(&p).to_lowercase();
+			if l.ends_with("._dt") || l.ends_with(".dt2") {
+				f.dt2 += usize::from(l.ends_with(".dt2"));
+				f.tables_us += usize::from(l.split('.').next().unwrap_or("").ends_with("_us"));
+			}
 			let (n, k) = if l.ends_with(".bin") && scena {
 				(&mut f.scenes, 4.3)
 			} else if l.ends_with("._dt") || l.ends_with(".dt2") {
 				(&mut f.tables, 1.3)
 			} else if l.ends_with(".itp") {
 				(&mut f.textures, 1.5)
+			} else if l.ends_with(".itc") {
+				(&mut f.sprites, 1.5)
 			} else {
 				(&mut f.others, 1.0)
 			};
@@ -758,21 +903,43 @@ pub fn scan_game_ed7(data: &Path) -> Vec<Ed7Folder> {
 
 pub fn scan_project_ed7(proj: &Path) -> Vec<Ed7Folder> {
 	let manifest = Manifest::load(proj);
+	let layout = Layout::new(proj);
 	let mut out = Vec::new();
-	for d in subdirs(proj) {
+	for d in layout.folders() {
 		let name = file_name(&d);
 		let mut files = Vec::new();
 		walk(&d, &mut files);
 		let mut f = Ed7Folder { key: name.to_lowercase(), name: name.clone(), ..Default::default() };
+		let mut sprites: HashSet<PathBuf> = HashSet::new();
+		let mut changed_sprites: HashSet<PathBuf> = HashSet::new();
 		for p in files {
 			let fname = file_name(&p);
 			if fname.starts_with("~$") || fname.starts_with('.') {
 				continue;
 			}
 			let l = fname.to_lowercase();
-			let raw = p.strip_prefix(proj).ok().and_then(|r| manifest.map.get(&rel_key(r))).is_some_and(|a| a.1 == RAW);
+			if l.ends_with(".xlsx") {
+				f.dt2 += usize::from(l.starts_with("monsnote"));
+				f.tables_us += usize::from(l.trim_end_matches(".xlsx").ends_with("_us"));
+			}
+			let sprite = p.parent().filter(|d| file_name(d).to_lowercase().ends_with(".itc")).map(Path::to_path_buf);
+			let raw = manifest.map.get(&rel_key(&layout.logical(&p))).is_some_and(|a| a.1 == RAW);
 			let (n, k) = if raw {
 				(&mut f.others, 1.0)
+			} else if let Some(d) = &sprite {
+				let n = usize::from(sprites.insert(d.clone()));
+				f.sprites += n;
+				let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+				f.size += sz;
+				let key = rel_key(&layout.logical(&p));
+				let same = manifest.map.get(&key).is_some_and(|(h, _)| std::fs::read(&p).map(|x| fnv(&x)).ok() == Some(*h));
+				if !same {
+					if changed_sprites.insert(d.clone()) {
+						f.changed += 1;
+					}
+					f.out_size += (sz as f64 / 1.5) as u64;
+				}
+				continue;
 			} else if l.ends_with(".json") {
 				(&mut f.scenes, 4.3)
 			} else if l.ends_with(".xlsx") {
@@ -785,7 +952,7 @@ pub fn scan_project_ed7(proj: &Path) -> Vec<Ed7Folder> {
 			*n += 1;
 			let sz = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
 			f.size += sz;
-			let key = p.strip_prefix(proj).map(rel_key).unwrap_or_default();
+			let key = rel_key(&layout.logical(&p));
 			let same = match manifest.map.get(&key) {
 				Some((h, _)) => std::fs::read(&p).map(|d| fnv(&d)).ok() == Some(*h),
 				None => false,
@@ -798,6 +965,121 @@ pub fn scan_project_ed7(proj: &Path) -> Vec<Ed7Folder> {
 		out.push(f);
 	}
 	out
+}
+
+pub(crate) fn disk_full(msg: &str) -> bool {
+	msg.contains("os error 112") || msg.contains("os error 28") || msg.to_lowercase().contains("no space left")
+}
+
+pub fn log_check(sink: &dyn Sink, found: &[String]) {
+	sink.log(&lformat!("✖ Сборка остановлена: в переводе сломаны служебные коды или подстановки — {}:", "✖ Build stopped: service codes or placeholders are broken in the translation: {}:", found.len()));
+	for f in found.iter().take(30) {
+		sink.log(&format!("  · {f}"));
+	}
+	if found.len() > 30 {
+		sink.log(&lformat!("  … и ещё {}", "  … and {} more", found.len() - 30));
+	}
+	sink.log(tr("  Исправьте их (подробно — во вкладке «Проверки» Сверки) или соберите всё равно.", "  Fix them (details are in the Checks tab of CrossbellCompare) or build anyway."));
+}
+
+pub fn free_space(path: &Path) -> Option<u64> {
+	let mut p = path.to_path_buf();
+	while !p.exists() {
+		p = p.parent()?.to_path_buf();
+	}
+	#[cfg(windows)]
+	{
+		use std::os::windows::ffi::OsStrExt;
+		let w: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+		let mut free: u64 = 0;
+		let ok = unsafe { windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(w.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+		if ok != 0 { Some(free) } else { None }
+	}
+	#[cfg(not(windows))]
+	{
+		let out = std::process::Command::new("df").arg("-k").arg(&p).output().ok()?;
+		let s = String::from_utf8_lossy(&out.stdout);
+		s.lines().nth(1)?.split_whitespace().nth(3)?.parse::<u64>().ok().map(|k| k * 1024)
+	}
+}
+#[cfg(test)]
+#[test]
+fn section_layout() {
+	let d = std::env::temp_dir().join(format!("cb_sections_{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&d);
+	std::fs::create_dir_all(&d).unwrap();
+	assert_eq!(Layout::new(&d).path(Path::new("scena_us/c0100.json")), d.join("scena_us").join("c0100.json"));
+	std::fs::create_dir_all(d.join("Text for translation")).unwrap();
+	std::fs::create_dir_all(d.join("Pictures").join("visual_us")).unwrap();
+	let l = Layout::new(&d);
+	assert_eq!(l.path(Path::new("scena_us/c0100.json")), d.join("Text for translation").join("scena_us").join("c0100.json"));
+	assert_eq!(l.path(Path::new("visual_us/a.png")), d.join("Pictures").join("visual_us").join("a.png"));
+	assert_eq!(l.path(Path::new("face/k.png")), d.join("Portraits").join("face").join("k.png"));
+	assert_eq!(l.logical(&d.join("Pictures").join("visual_us").join("a.png")), Path::new("visual_us").join("a.png"));
+	let names: Vec<String> = l.folders().iter().map(|p| file_name(p)).collect();
+	assert_eq!(names, ["visual_us"]);
+	let _ = std::fs::remove_dir_all(&d);
+}
+#[test]
+fn include_keeps_only_selected_folders() {
+	struct Quiet;
+	impl Sink for Quiet {
+		fn log(&self, _: &str) {}
+		fn progress(&self, _: usize, _: usize) {}
+	}
+	let d = std::env::temp_dir().join(format!("inc_ed7_{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&d);
+	let game = d.join("Trails from Zero").join("data");
+	for f in ["extra/a.txt", "monster/b.txt", "visual/c.txt", "scena_us/d.txt"] {
+		let p = game.join(f);
+		std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+		std::fs::write(p, b"x").unwrap();
+	}
+	let proj = d.join("proj");
+	let o = Options { title: Title::Zero, game_dir: game, proj_dir: proj.clone(), out_dir: d.join("out"), scena: true, tables: true, textures: true, other: true, keep_failed: true, tex_dds: false, check: false, mask: String::new(), only_changed: true, overwrite_edited: false, include: Some(vec!["visual".into(), "scena_us".into()]), build_only: None };
+	let s = decompile(&o, &Quiet);
+	let mut got = Vec::new();
+	walk(&proj, &mut got);
+	let mut got: Vec<String> = got.iter().filter(|p| !file_name(p).starts_with('.')).map(|p| rel_key(p.strip_prefix(&proj).unwrap())).collect();
+	got.sort();
+	let _ = std::fs::remove_dir_all(&d);
+	assert_eq!(got, ["scena_us/d.txt", "visual/c.txt"], "result: {}", s.ok);
+}
+#[test]
+fn project_keeps_its_game() {
+	struct Quiet;
+	impl Sink for Quiet {
+		fn log(&self, _: &str) {}
+		fn progress(&self, _: usize, _: usize) {}
+	}
+	let d = std::env::temp_dir().join(format!("mark_ed7_{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&d);
+	let (game, proj) = (d.join("game"), d.join("proj"));
+	std::fs::create_dir_all(game.join("text")).unwrap();
+	let mut o = Options { title: Title::Azure, game_dir: game, proj_dir: proj.clone(), out_dir: d.join("out"), scena: true, tables: true, textures: true, other: true, keep_failed: true, tex_dds: false, check: false, mask: String::new(), only_changed: true, overwrite_edited: false, include: None, build_only: None };
+	assert_eq!(decompile(&o, &Quiet).failed, 0);
+	assert_eq!(project_game(&proj), Some(Title::Azure));
+	o.title = Title::Zero;
+	assert_eq!(decompile(&o, &Quiet).failed, 1, "разобрать другую игру в ту же папку нельзя");
+	assert_eq!(compile(&o, &Quiet).failed, 1, "собрать проект как другую игру нельзя");
+	assert_eq!(project_game(&proj), Some(Title::Azure));
+	let _ = std::fs::remove_dir_all(&d);
+}
+
+#[cfg(test)]
+#[test]
+fn scan_counts_sprites_and_table_kinds() {
+	let d = std::env::temp_dir().join(format!("scan_ed7_{}", std::process::id()));
+	let _ = std::fs::remove_dir_all(&d);
+	let m = d.join("monsnote");
+	std::fs::create_dir_all(&m).unwrap();
+	for n in ["monsnote.dt2", "monsnote_us.dt2", "a.itp", "b.itc", "c.bin"] {
+		std::fs::write(m.join(n), b"x").unwrap();
+	}
+	let v = scan_game_ed7(&d);
+	let f = &v[0];
+	assert_eq!((f.tables, f.dt2, f.tables_us, f.textures, f.sprites, f.others), (2, 2, 1, 1, 1, 1));
+	let _ = std::fs::remove_dir_all(&d);
 }
 
 #[cfg(test)]

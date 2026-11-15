@@ -53,12 +53,11 @@ fn story(d: &mut Disc) -> Res<()> {
 	ts.sort();
 	ts.dedup();
 	let mut rest = &ts[..];
-	if let [a, b, ..] = ts[..] {
-		if !d.bytes(a, b)?.contains(&0) {
+	if let [a, b, ..] = ts[..]
+		&& !d.bytes(a, b)?.contains(&0) {
 			d.data(a, b - a)?;
 			rest = &ts[1..];
 		}
-	}
 	for &t in rest {
 		d.string(t)?;
 	}

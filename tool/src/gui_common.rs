@@ -6,6 +6,44 @@ use eframe::egui::{self, Align2, Color32, CornerRadius, FontFamily, FontId, Pos2
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub fn blurred_texture(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<egui::TextureHandle> {
+	let img = image::load_from_memory(png).ok()?.to_rgba8();
+	let w = 240u32.min(img.width());
+	let h = (img.height() * w / img.width().max(1)).max(1);
+	let small = image::imageops::resize(&img, w, h, image::imageops::FilterType::Triangle);
+	let blur = image::imageops::blur(&small, 2.5);
+	Some(ctx.load_texture(name, egui::ColorImage::from_rgba_unmultiplied([blur.width() as usize, blur.height() as usize], blur.as_raw()), egui::TextureOptions::LINEAR))
+}
+
+pub fn picker_backdrops(ui: &Ui, rect: Rect, layers: &[(&egui::TextureHandle, f32)], bg: Color32) {
+	let mut top = 0.0f32;
+	let mut order: Vec<&(&egui::TextureHandle, f32)> = layers.iter().filter(|l| l.1 > 0.0).collect();
+	order.sort_by(|a, b| a.1.total_cmp(&b.1));
+	for (tex, t) in order {
+		picker_image(ui, rect, tex, *t);
+		top = top.max(*t);
+	}
+	if top > 0.0 {
+		let light = bg.r() as u32 + bg.g() as u32 + bg.b() as u32 > 3 * 128;
+		let veil = if light { 40.0 } else { 160.0 };
+		ui.painter().rect_filled(rect, 0, Color32::from_rgba_unmultiplied(bg.r(), bg.g(), bg.b(), (top * veil) as u8));
+	}
+}
+
+fn picker_image(ui: &Ui, rect: Rect, tex: &egui::TextureHandle, t: f32) {
+	let ts = tex.size_vec2();
+	let (want, have) = (rect.width() / rect.height().max(1.0), ts.x / ts.y.max(1.0));
+	let uv = if have < want {
+		let h = have / want;
+		Rect::from_min_max(Pos2::new(0.0, (1.0 - h) / 2.0), Pos2::new(1.0, (1.0 + h) / 2.0))
+	} else {
+		let w = want / have;
+		Rect::from_min_max(Pos2::new((1.0 - w) / 2.0, 0.0), Pos2::new((1.0 + w) / 2.0, 1.0))
+	};
+	let a = (t * 255.0) as u8;
+	ui.painter().image(tex.id(), rect, uv, Color32::from_rgba_unmultiplied(255, 255, 255, a));
+}
+
 pub use crossbell_tool::lang::{UI_EN, tr, ui_en};
 
 pub struct Settings {
@@ -269,6 +307,8 @@ pub fn icon(name: &str) -> egui::ImageSource<'static> {
 		"sheet" => ("bytes://sheet.svg", include_bytes!("icons/sheet.svg")),
 		"undo" => ("bytes://undo.svg", include_bytes!("icons/undo.svg")),
 		"stop" => ("bytes://stop.svg", include_bytes!("icons/stop.svg")),
+		"pause" => ("bytes://pause.svg", include_bytes!("icons/pause.svg")),
+		"play" => ("bytes://play.svg", include_bytes!("icons/play.svg")),
 		"x" => ("bytes://x.svg", include_bytes!("icons/x.svg")),
 		"refresh" => ("bytes://refresh.svg", include_bytes!("icons/refresh.svg")),
 		"info" => ("bytes://info.svg", include_bytes!("icons/info.svg")),
@@ -460,12 +500,56 @@ pub fn small_button(ui: &mut Ui, p: &Pal, text: &str, icon_name: Option<&str>, h
 	if enabled { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp }
 }
 
-pub fn small_button_width(ui: &Ui, text: &str, icon: bool) -> f32 {
-	ui.fonts(|f| f.layout_no_wrap(text.to_string(), f_body(13.0), Color32::WHITE).size().x) + if icon { 22.0 } else { 0.0 } + 24.0
+pub fn page_tabs(ui: &Ui, p: &Pal, x0: f32, x1: f32, y: f32, labels: &[&str], sel: &mut usize) -> bool {
+	let h = 34.0;
+	let mut x = x0;
+	let mut changed = false;
+	ui.painter().line_segment([Pos2::new(x0, y + h), Pos2::new(x1, y + h)], Stroke::new(1.0, p.div));
+	for (i, t) in labels.iter().enumerate() {
+		let on = *sel == i;
+		let font = if on { f_semi(14.5) } else { f_body(14.5) };
+		let tw = ui.fonts(|f| f.layout_no_wrap(t.to_string(), font.clone(), p.text).size().x) + 32.0;
+		let r = Rect::from_min_size(Pos2::new(x, y), Vec2::new(tw, h));
+		let resp = ui.interact(r, ui.id().with(("page", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+		if resp.hovered() && !on {
+			ui.painter().rect_filled(r.shrink2(Vec2::new(0.0, 3.0)), 6, p.div2);
+		}
+		ui.painter().text(r.center(), Align2::CENTER_CENTER, *t, font, if on { p.text } else { p.muted });
+		if on {
+			ui.painter().rect_filled(Rect::from_min_size(Pos2::new(x, y + h - 2.0), Vec2::new(tw, 2.0)), 0, p.accent);
+		}
+		if resp.clicked() && !on {
+			*sel = i;
+			changed = true;
+		}
+		x += tw + 4.0;
+	}
+	changed
 }
 
-pub fn primary_button(ui: &mut Ui, p: &Pal, text: &str, size: Vec2, radius: u8, font: FontId, enabled: bool) -> Response {
-	primary_button_icon(ui, p, text, None, size, radius, font, enabled)
+pub fn action_button(ui: &Ui, p: &Pal, rect: Rect, id: &str, icon: &str, title: &str, subtitle: &str, busy: bool, running: bool, prog: Option<f32>) -> bool {
+	let resp = ui.interact(rect, ui.id().with(("main", id)), if busy { Sense::hover() } else { Sense::click() });
+	let painter = ui.painter().with_clip_rect(rect.expand(1.0));
+	painter.rect_filled(rect, 12, if resp.hovered() && !busy { p.accent_strong } else { p.accent });
+	let ix = rect.min.x + 20.0;
+	paint_icon(ui, icon, Rect::from_min_size(Pos2::new(ix, rect.center().y - 13.0), Vec2::splat(26.0)), p.on_accent);
+	let tx = ix + 26.0 + 14.0;
+	painter.text(Pos2::new(tx, rect.center().y - 10.0), Align2::LEFT_CENTER, title, f_semi(21.0), p.on_accent);
+	painter.text(Pos2::new(tx, rect.center().y + 13.0), Align2::LEFT_CENTER, subtitle, f_body(13.0), p.on_accent.gamma_multiply(0.85));
+	if running
+		&& let Some(pr) = prog {
+			let br = Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - 4.0), Vec2::new(rect.width() * pr.clamp(0.0, 1.0), 4.0));
+			painter.with_clip_rect(rect.shrink(0.5)).rect_filled(br, CornerRadius { nw: 0, ne: 0, sw: 12, se: if pr >= 0.99 { 12 } else { 0 } }, p.ok_strong);
+		}
+	let clicked = resp.clicked();
+	if !busy {
+		resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+	}
+	clicked
+}
+
+pub fn small_button_width(ui: &Ui, text: &str, icon: bool) -> f32 {
+	ui.fonts(|f| f.layout_no_wrap(text.to_string(), f_body(13.0), Color32::WHITE).size().x) + if icon { 22.0 } else { 0.0 } + 24.0
 }
 
 pub fn primary_button_icon(ui: &mut Ui, p: &Pal, text: &str, icon_name: Option<&str>, size: Vec2, radius: u8, font: FontId, enabled: bool) -> Response {
@@ -535,12 +619,11 @@ pub fn combo(ui: &mut Ui, p: &Pal, id: &str, items: &[String], sel: &mut usize, 
 					ui.painter().rect_filled(r, 7, if rr.hovered() { p.sel } else { p.div2 });
 				}
 				paint_text_clipped(ui, r.shrink2(Vec2::new(10.0, 0.0)), t, font.clone(), p.text, Align2::LEFT_CENTER);
-				if rr.clicked() {
-					if *sel != i {
+				if rr.clicked()
+					&& *sel != i {
 						*sel = i;
 						changed = true;
 					}
-				}
 			}
 		});
 	});
@@ -627,11 +710,10 @@ pub fn set_dialog_owner(cc: &eframe::CreationContext) {
 	#[cfg(windows)]
 	{
 		use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-		if let Ok(h) = cc.window_handle() {
-			if let RawWindowHandle::Win32(w) = h.as_raw() {
+		if let Ok(h) = cc.window_handle()
+			&& let RawWindowHandle::Win32(w) = h.as_raw() {
 				MAIN_HWND.store(w.hwnd.get(), std::sync::atomic::Ordering::Relaxed);
 			}
-		}
 	}
 	#[cfg(not(windows))]
 	let _ = cc;
@@ -865,7 +947,7 @@ fn notepad_pp() -> Option<PathBuf> {
 		}
 		let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
 		let p = PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])).join("notepad++.exe");
-		return p.is_file().then_some(p);
+		p.is_file().then_some(p)
 	}
 	#[cfg(not(windows))]
 	None

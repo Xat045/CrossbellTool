@@ -42,7 +42,7 @@ CrossbellCompare:
 1. Download the archives from [Releases](../../releases) and unpack them anywhere. `data.dat` must stay next to `CrossbellCompare.exe`: it holds the game icons and portraits shown in the text.
 2. In CrossbellTool, choose the game folder or a translation mod's folder under **Game folder or files**, or drop the folder on the window. Its `data` folder is used.
 3. In the **What to decompile** window, tick what you need.
-4. Set the **Project folder (for editing)** and the **Output folder**.
+4. Set the **Project folder (for editing)** and, on the **Build** tab, the **Output folder**.
 5. Click **Decompile all** and edit the files in the project folder.
 6. Click **Build** and tick the folders in the **What to build** window.
 7. Copy the result into the game's `data` folder, replacing the files.
@@ -81,9 +81,10 @@ Old-format textures with a palette (models, maps, monsters) decompile to `.png`;
 
 ### Decompiling
 
-The **What to decompile** window lists the `data` folders under text for translation and textures. For each one it shows the number of scenes, tables and images, the language and the size. At the bottom you see how much the unpacked files will take and roughly how long it will take.
+The **What to decompile** window lists the `data` folders by section: text for translation, interface and menus, mini-games and notes, pictures, portraits, battle and effects, characters and monsters, maps, voices, music and sounds, video and other. For each one it shows the number of scenes, tables and images, the language and the size. At the bottom you see how much the unpacked files will take and roughly how long it will take.
 
 - **Quick choices:** **Text only**, **Text+textures**, **All**, **Clear all**.
+- **Folder structure:** the last step chooses the project layout. **As in the game** keeps the `data` folders right in the project folder. **By section** creates the section folders and puts the `data` folders into them; the build finds them by itself.
 - **File mask:** decompile only specific files, for example `c0100, t_town, c01*`.
 - **Your edits are safe:** files you have already edited are not overwritten when you decompile again.
 - **Disk space:** it is checked first, and the program warns you if it's short.
@@ -162,13 +163,13 @@ The meaning of each service code is described in the [full guide](docs/ReadMe_Cr
 
 ```
 CrossbellTool decompile --game zero|azure --data <data folder> --proj <project folder>
-              [--types scena,tables,textures] [--mask ...] [--overwrite] [--dds]
+              [--types scena,tables,textures,other] [--mask ...] [--overwrite] [--dds]
 CrossbellTool compile   --proj <project folder> --out <output folder>
               [--data <data folder>] [--types ...] [--mask ...] [--all] [--no-check]
 CrossbellTool file [--game zero|azure] <file>
 ```
 
-`--data` in `compile` compares tables with the original, and `--all` builds everything rather than only changed files. `CrossbellTool file` converts one `.bin`, `._dt` or `.itp` file and back; `.bin` needs `--game`.
+`--data` in `compile` compares tables with the original, and `--all` builds everything rather than only changed files. `CrossbellTool file` converts one `.bin`, `._dt`, `.dt2` or `.itp` file and back; `.bin` needs `--game`. An `.itc` sprite goes to a `<name>_frames` folder, and that folder goes back to `<name>_new.itc`, with `<name>.itc` next to it.
 
 ## Building from source
 

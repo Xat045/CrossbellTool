@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::gui_common::*;
-use crate::kai_pick::{Event as PEvent, Item as PItem, Mode as PMode, Picker};
-use crossbell_tool::jobs::{self, Options};
-use crossbell_tool::scena::{detect_title, Title as Game};
+use crate::crossbell_pick::{Event as PEvent, Item as PItem, Mode as PMode, Picker};
+use crossbell_tool::crossbell::jobs::{self, Options};
+use crossbell_tool::crossbell::scena::{detect_title, Title as Game};
 
 const TITLE: &str = concat!("CrossbellTool ", env!("VER_CROSSBELLTOOL"), env!("VER_SUFFIX"), " — Trails from Zero / Trails to Azure");
 fn game_items() -> [&'static str; 3] {
@@ -25,6 +25,7 @@ struct Shared {
 	total: AtomicUsize,
 	finished: AtomicBool,
 	cancel: AtomicBool,
+	pause: AtomicBool,
 	current: Mutex<String>,
 	check: Mutex<Vec<String>>,
 }
@@ -53,6 +54,9 @@ impl jobs::Sink for GuiSink {
 		self.ctx.request_repaint();
 	}
 	fn cancelled(&self) -> bool {
+		while self.shared.pause.load(Ordering::SeqCst) && !self.shared.cancel.load(Ordering::SeqCst) {
+			std::thread::sleep(std::time::Duration::from_millis(100));
+		}
 		self.shared.cancel.load(Ordering::SeqCst)
 	}
 	fn current(&self, name: &str) {
@@ -162,6 +166,7 @@ struct App {
 	game_sel: usize,
 	mode: usize,
 	tab: usize,
+	page: usize,
 	log: Vec<LogLine>,
 	log_to_end: bool,
 	shared: Option<Arc<Shared>>,
@@ -176,6 +181,8 @@ struct App {
 	dec_sel: Option<(String, Vec<PItem>)>,
 	build_est: u64,
 	build_once: Option<Vec<String>>,
+	other_files: bool,
+	keep_failed: bool,
 	tex_dds: bool,
 	skip_check: bool,
 	last_build: Option<Vec<String>>,
@@ -204,9 +211,10 @@ impl App {
 		let key_o = g.map(|g| format!("out_{}", g.key())).unwrap_or_else(|| "out".into());
 		let proj = st.get(&key_p).or(st.get("proj")).map(|s| s.to_string()).unwrap_or_default();
 		let out = st.get(&key_o).or(st.get("out")).map(|s| s.to_string()).unwrap_or_default();
-		crate::kai_pick::set_speed(st.get("unpack_speed").and_then(|v| v.parse().ok()).unwrap_or(0.0));
-		crate::kai_pick::set_build_speed(st.get("build_speed").and_then(|v| v.parse().ok()).unwrap_or(0.0));
-		let app = App {
+		crate::crossbell_pick::set_speed(st.get("unpack_speed").and_then(|v| v.parse().ok()).unwrap_or(0.0));
+		crate::crossbell_pick::set_build_speed(st.get("build_speed").and_then(|v| v.parse().ok()).unwrap_or(0.0));
+		
+		App {
 			pal,
 			src: st.get_or("game", "").to_string(),
 			proj,
@@ -215,6 +223,7 @@ impl App {
 			game_sel,
 			mode: if st.get("what") == Some("all") { 1 } else { 0 },
 			tab: 0,
+			page: if st.get("page") == Some("1") { 1 } else { 0 },
 			log: Vec::new(),
 			log_to_end: false,
 			shared: None,
@@ -230,20 +239,24 @@ impl App {
 			build_est: 0,
 			build_once: None,
 			tex_dds: st.get("tex_fmt") == Some("dds"),
+			other_files: st.get("other_files") == Some("1"),
+			keep_failed: st.get("keep_failed") != Some("0"),
 			skip_check: false,
 			last_build: None,
 			build_ready: false,
 			det_cache: Default::default(),
 			settings: st,
-		};
-		app
+		}
 	}
 
 	fn save_settings(&mut self) {
 		let st = &mut self.settings;
 		st.set("game", &self.src);
 		st.set("mask", &self.mask);
+		st.set("page", if self.page == 1 { "1" } else { "0" });
 		st.set("tex_fmt", if self.tex_dds { "dds" } else { "png" });
+		st.set("other_files", if self.other_files { "1" } else { "0" });
+		st.set("keep_failed", if self.keep_failed { "1" } else { "0" });
 		st.set("what", if self.mode == 1 { "all" } else { "text" });
 		st.set("title", &self.game_sel.to_string());
 		st.set("dark", if self.pal.dark { "1" } else { "0" });
@@ -258,8 +271,8 @@ impl App {
 				st.set("out", &self.out);
 			}
 		}
-		st.set("unpack_speed", &format!("{:.0}", crate::kai_pick::speed()));
-		st.set("build_speed", &format!("{:.0}", crate::kai_pick::build_speed()));
+		st.set("unpack_speed", &format!("{:.0}", crate::crossbell_pick::speed()));
+		st.set("build_speed", &format!("{:.0}", crate::crossbell_pick::build_speed()));
 		st.save();
 	}
 
@@ -284,9 +297,42 @@ impl App {
 			None => ("proj".into(), "out".into()),
 		};
 		let st = &self.settings;
-		self.proj = st.get(&kp).map(|s| s.to_string()).unwrap_or_else(|| self.proj.clone());
-		self.out = st.get(&ko).map(|s| s.to_string()).unwrap_or_else(|| self.out.clone());
+		self.proj = st.get(&kp).map(|s| s.to_string()).unwrap_or_default();
+		self.out = st.get(&ko).map(|s| s.to_string()).unwrap_or_default();
 		self.save_settings();
+	}
+
+	fn foreign_dirs(&self, o: &Options, compile: bool) -> Option<String> {
+		let g = o.title;
+		let other = g.other();
+		let gname = |t: Game| if t.key() == "zero" { "Trails from Zero" } else { "Trails to Azure" };
+		let mut why = Vec::new();
+		if let Some(pg) = jobs::project_game(&o.proj_dir).filter(|&pg| pg.key() != g.key()) {
+			why.push(lformat!("Папка для правки — проект {}, а выбрана {}:\n{}", "The folder to edit is the {} project, but {} is selected:\n{}", gname(pg), gname(g), o.proj_dir.display()));
+		}
+		let has_word = |p: &std::path::Path, w: &str| {
+			p.to_string_lossy().to_lowercase().split(|c: char| !c.is_alphanumeric()).any(|x| x == w)
+		};
+		let mut dirs = vec![(tr("для правки", "project"), &o.proj_dir)];
+		if compile {
+			dirs.push((tr("для собранного", "for the build"), &o.out_dir));
+		}
+		for (what, d) in dirs {
+			if has_word(d, other.key()) && !has_word(d, g.key()) && !why.iter().any(|w| w.contains(&d.display().to_string())) {
+				why.push(lformat!("В пути папки {what} — {}, а выбрана {}:\n{}", "The path of the folder {what} says {}, but {} is selected:\n{}", gname(other), gname(g), d.display()));
+			}
+		}
+		if compile {
+			let me = exe_dir().file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+			let old = o.out_dir.ancestors().filter_map(|a| a.file_name()).map(|n| n.to_string_lossy().to_string()).find(|n| {
+				let l = n.to_lowercase();
+				l.starts_with("crossbelltool_") && l != me
+			});
+			if let Some(old) = old.filter(|_| me.starts_with("crossbelltool_")) {
+				why.push(lformat!("Папка для собранного — внутри другой версии программы ({old}):\n{}", "The output folder is inside another version of the program ({old}):\n{}", o.out_dir.display()));
+			}
+		}
+		if why.is_empty() { None } else { Some(why.join("\n\n")) }
 	}
 
 	fn title(&self) -> Option<Game> {
@@ -295,7 +341,7 @@ impl App {
 
 	fn options(&self) -> Options {
 		Options {
-			title: self.title().unwrap_or(Game::Zero),
+			title: self.title().or_else(|| jobs::project_game(std::path::Path::new(self.proj.trim()))).unwrap_or(Game::Zero),
 			game_dir: data_dir(&self.src),
 			proj_dir: PathBuf::from(self.proj.trim()),
 			out_dir: PathBuf::from(self.out.trim()),
@@ -303,6 +349,7 @@ impl App {
 			tables: true,
 			textures: true,
 			other: true,
+			keep_failed: self.keep_failed,
 			tex_dds: self.tex_dds,
 			check: !self.skip_check,
 			mask: self.mask.trim().to_string(),
@@ -332,10 +379,13 @@ impl App {
 	fn open_pick(&mut self, then_start: bool, ctx: &egui::Context) {
 		let Some(d) = self.src_dir() else { return };
 		let mut pk = match self.sel_items() {
-			Some(items) => Picker::with_items_ed7(PMode::Decompile, &d, items.clone(), then_start),
-			None => Picker::open_ed7(PMode::Decompile, &d, then_start, ctx),
+			Some(items) => Picker::with_items(PMode::Decompile, &d, items.clone(), then_start),
+			None => Picker::open(PMode::Decompile, &d, then_start, ctx),
 		};
 		pk.tex_dds = self.tex_dds;
+		pk.other_files = self.other_files;
+		pk.keep_failed = self.keep_failed;
+		pk.sections = crossbell_tool::crossbell::jobs::uses_sections(std::path::Path::new(self.proj.trim()));
 		self.pick = Some(pk);
 	}
 
@@ -347,11 +397,10 @@ impl App {
 	}
 
 	fn detected_ui(&self) -> Option<Game> {
-		if let Some((src, g)) = self.det_cache.borrow().as_ref() {
-			if *src == self.src {
+		if let Some((src, g)) = self.det_cache.borrow().as_ref()
+			&& *src == self.src {
 				return *g;
 			}
-		}
 		let g = self.detected();
 		*self.det_cache.borrow_mut() = Some((self.src.clone(), g));
 		g
@@ -387,11 +436,14 @@ impl App {
 		if compile && !confirmed && !self.build_ready {
 			let proj = self.proj.trim().to_string();
 			if !proj.is_empty() && std::path::Path::new(&proj).is_dir() {
-				self.pick = Some(Picker::open_ed7(PMode::Build, &proj, true, ctx));
+				self.pick = Some(Picker::open(PMode::Build, &proj, true, ctx));
 				return;
 			}
 		}
-		let o = self.options();
+		let mut o = self.options();
+		if !compile {
+			o.other = self.other_files;
+		}
 		if !compile && !o.game_dir.is_dir() {
 			self.tab = 1;
 			self.push_log(tr("Укажите папку игры или файлы.", "Choose the game folder or files."), Kind::Warn);
@@ -411,7 +463,7 @@ impl App {
 			} else {
 				(self.sel_items().map(|v| v.iter().filter(|i| i.on).map(|i| i.unpacked).sum()).unwrap_or(0), &o.proj_dir, tr("для правки", "project"))
 			};
-			let free = crossbell_tool::kai::jobs::free_space(dir);
+			let free = crossbell_tool::crossbell::jobs::free_space(dir);
 			if let Some(f) = free.filter(|&f| need > 0 && f < need + (need >> 5)) {
 				let gb = |b: u64| b as f64 / 1073741824.0;
 				self.dialog = Dialog::Ask(
@@ -424,6 +476,10 @@ impl App {
 				);
 				return;
 			}
+		}
+		if !confirmed && let Some(warn) = self.foreign_dirs(&o, compile) {
+			self.dialog = Dialog::Ask(lformat!("{warn}\n\nПроверьте папки. Всё равно начать?", "{warn}\n\nCheck the folders. Start anyway?"), Action::Start(op));
+			return;
 		}
 		let into_game = o.out_dir.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("data")).unwrap_or(false)
 			|| (!self.src.trim().is_empty() && same_dir(&o.out_dir, &o.game_dir));
@@ -460,13 +516,13 @@ impl App {
 			if let (true, false, Ok(s)) = (compile, cancelled, &res) {
 				let secs = start.elapsed().as_secs_f64();
 				if est > 0 && secs >= 10.0 && s.ok > 0 {
-					crate::kai_pick::set_build_speed(est as f64 / secs);
+					crate::crossbell_pick::set_build_speed(est as f64 / secs);
 				}
 			}
 			if let (false, false, Ok(s)) = (compile, cancelled, &res) {
 				let secs = start.elapsed().as_secs_f64();
 				if est > 0 && secs >= 30.0 && s.ok > 0 {
-					crate::kai_pick::set_speed(est as f64 / secs);
+					crate::crossbell_pick::set_speed(est as f64 / secs);
 				}
 			}
 			if !cancelled && start.elapsed().as_secs() >= 10 {
@@ -497,7 +553,7 @@ impl App {
 		let (d, t) = (sh.done.load(Ordering::SeqCst), sh.total.load(Ordering::SeqCst));
 		if t > 0 && !sh.finished.load(Ordering::SeqCst) {
 			let what = if self.op == Some(Op::Compile) { tr("Сборка", "Building") } else { tr("Декомпиляция", "Decompiling") };
-			let left = if d >= 3 && d < t { lformat!(" · осталось {}", " · {} left", crate::kai_pick::fmt_time(self.op_start.elapsed().as_secs_f64() / d as f64 * (t - d) as f64)) } else { String::new() };
+			let left = if d >= 3 && d < t { lformat!(" · осталось {}", " · {} left", crate::crossbell_pick::fmt_time(self.op_start.elapsed().as_secs_f64() / d as f64 * (t - d) as f64)) } else { String::new() };
 			let cur = sh.current.lock().unwrap().clone();
 			self.status = lformat!("{what}: {d} из {t} файлов{left}{}", "{what}: {d} of {t} files{left}{}", if cur.is_empty() { String::new() } else { format!(" · {cur}") });
 		}
@@ -511,14 +567,17 @@ impl App {
 				}
 				self.dialog = Dialog::Ask(lformat!("В переводе сломаны служебные коды или подстановки — {}. Игра может показать не то или упасть.\n\n{}\n\nИсправьте их (подробно — вкладка «Проверки» Сверки) или соберите всё равно.\n\nСобрать всё равно?", "Service codes or placeholders are broken in the translation: {}. The game may show the wrong text or crash.\n\n{}\n\nFix them (details are in the Checks tab of CrossbellCompare) or build anyway.\n\nBuild anyway?", check.len(), list.join("\n")), Action::ForceBuild);
 			}
+			let refused = !cancelled && self.log.iter().any(|l| l.text.trim_start().starts_with('✖')) && !self.log.iter().any(|l| matches!(l.kind, Kind::Done));
 			self.status = if cancelled {
 				tr("Остановлено", "Stopped").into()
+			} else if refused {
+				tr("Не выполнено — причина в журнале", "Not done: see the log for the reason").into()
 			} else if self.op == Some(Op::Compile) {
 				tr("Сборка завершена", "Build finished").into()
 			} else {
 				tr("Декомпиляция завершена — правьте файлы в папке проекта", "Decompile finished: edit the files in the project folder").into()
 			};
-			if !cancelled {
+			if !cancelled && !refused {
 				self.last_done = self.op;
 			}
 			self.shared = None;
@@ -537,6 +596,18 @@ impl App {
 		self.flash = Some((s.to_string(), Instant::now()));
 	}
 
+	fn mask_field(&mut self, ui: &mut egui::Ui, p: &Pal, mr: Rect, busy: bool) {
+		let mut r = ui.new_child(egui::UiBuilder::new().max_rect(mr));
+		r.painter().rect(mr, 8, p.surface, Stroke::new(1.0, p.div), StrokeKind::Inside);
+		let mut cr = r.new_child(egui::UiBuilder::new().max_rect(mr.shrink2(Vec2::new(12.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+		let resp = cr
+			.add(egui::TextEdit::singleline(&mut self.mask).frame(false).font(f_body(13.0)).desired_width(mr.width() - 24.0).interactive(!busy).hint_text(tr("все файлы", "all files")).margin(egui::Margin::ZERO))
+			.on_hover_text(tr("Только эти файлы, через запятую: c0100, t_town, c01*\nПусто — все файлы", "Only these files, comma-separated: c0100, t_town, c01*\nEmpty means all files"));
+		if resp.lost_focus() {
+			self.save_settings();
+		}
+	}
+
 	fn ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
 		let p = self.pal;
 		let full = ui.max_rect();
@@ -546,144 +617,122 @@ impl App {
 		let busy = self.shared.is_some();
 		let mut y = full.min.y + 18.0;
 
+		y -= 8.0;
+		if page_tabs(ui, &p, x0, x1, y, &[tr("Разборка", "Decompile"), tr("Сборка", "Building")], &mut self.page) {
+			self.save_settings();
+		}
+		y += 34.0 + 12.0;
 		let label_h = 16.0;
-		ui.painter().galley(Pos2::new(x0, y), ui.fonts(|f| f.layout_job(caps_job(tr("Папка игры или файлы", "Game folder or files"), p.muted))), p.muted);
-		let det = self.detected_ui();
-		let (right, rc) = if let Some(g) = sel_game(self.game_sel) {
-			(lformat!("Выбрано вручную: {}", "Chosen manually: {}", g.name()), p.accent)
-		} else if let Some(g) = det {
-			(lformat!("Определено по папке: {}", "Detected from the folder: {}", g.name()), p.accent)
-		} else if !self.src.trim().is_empty() {
-			(tr("Игра не определена — выберите в списке «Игра»", "Game not detected: choose it in the 'Game' list").to_string(), p.warn)
-		} else {
-			(tr("Игра определится по папке: zero.exe — Zero, ao.exe — Azure", "The game is detected from the folder: zero.exe is Zero, ao.exe is Azure").to_string(), p.muted)
+		let prog = self.progress();
+		let bh = 76.0;
+		let caption = |ui: &egui::Ui, x: f32, y: f32, t: &str, c: Color32| {
+			ui.painter().galley(Pos2::new(x, y), ui.fonts(|f| f.layout_job(caps_job(t, c))), c);
 		};
-		ui.painter().text(Pos2::new(x1, y + 6.0), Align2::RIGHT_CENTER, right, f_body(11.5), rc);
-		y += label_h + 5.0;
-		let empty = self.src.trim().is_empty();
-		let files_btn = self.src_dir().map(|_| match self.sel_items() {
-			Some(v) => lformat!("Файлы: {} из {}", "Files: {} of {}", v.iter().filter(|i| i.on).count(), v.len()),
-			None => tr("Файлы…", "Files…").to_string(),
-		});
-		let fb_w = files_btn.as_ref().map(|t| ui.fonts(|f| f.layout_no_wrap(t.clone(), f_body(13.0), p.text).size().x) + 24.0 + 20.0 + 10.0).unwrap_or(0.0);
-		if let Some(t) = &files_btn {
-			let br = Rect::from_min_size(Pos2::new(x1 - fb_w + 10.0, y), Vec2::new(fb_w - 10.0, 38.0));
-			let mut bu = ui.new_child(egui::UiBuilder::new().max_rect(br));
-			if small_button(&mut bu, &p, t, Some("check"), 38.0, !busy, p.accent).on_hover_text(tr("Выбрать галочками, что разбирать", "Tick what to decompile")).clicked() {
-				self.open_pick(false, ctx);
-			}
-		}
-		let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w - fb_w, 38.0))));
-		let (_, browse, brect) = path_field(&mut r, &p, "src", &mut self.src, 38.0, tr("Перетащите сюда папку игры — или нажмите «Обзор…»", "Drop the game folder here, or click 'Browse…'"), tr("Обзор…", "Browse…"), empty, !busy);
-		let _ = brect;
-		if browse {
-			if let Some(d) = pick_folder(self.src.trim()) {
-				self.src = d.display().to_string();
-				self.save_settings();
-				self.dec_sel = None;
-				self.open_pick(false, ctx);
-			}
-		}
-		y += 38.0 + 12.0;
+		let det = self.detected_ui();
+		if self.page == 0 {
+			caption(ui, x0, y, tr("Папка игры или файлы", "Game folder or files"), p.muted);
+			let (right, rc) = if let Some(g) = sel_game(self.game_sel) {
+				(lformat!("Выбрано вручную: {}", "Chosen manually: {}", g.name()), p.accent)
+			} else if let Some(g) = det {
+				(lformat!("Определено по папке: {}", "Detected from the folder: {}", g.name()), p.accent)
+			} else if !self.src.trim().is_empty() {
+				(tr("Игра не определена — выберите в списке «Игра»", "Game not detected: choose it in the 'Game' list").to_string(), p.warn)
+			} else {
+				(tr("Игра определится по папке: zero.exe — Zero, ao.exe — Azure", "The game is detected from the folder: zero.exe is Zero, ao.exe is Azure").to_string(), p.muted)
+			};
+			ui.painter().text(Pos2::new(x1, y + 6.0), Align2::RIGHT_CENTER, right, f_body(11.5), rc);
+			y += label_h + 5.0;
+			let empty = self.src.trim().is_empty();
+			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, 38.0))));
+			let (_, browse, _) = path_field(&mut r, &p, "src", &mut self.src, 38.0, tr("Перетащите сюда папку игры — или нажмите «Обзор…»", "Drop the game folder here, or click 'Browse…'"), tr("Обзор…", "Browse…"), empty, !busy);
+			if browse
+				&& let Some(d) = pick_folder(self.src.trim()) {
+					self.src = d.display().to_string();
+					self.save_settings();
+					self.dec_sel = None;
+					self.open_pick(false, ctx);
+				}
+			y += 38.0 + 12.0;
 
-		let colw = (w - 14.0) / 2.0;
-		for (i, (lbl, key)) in [(tr("Куда сохранять для правки", "Project folder (for editing)"), "proj"), (tr("Куда сохранять собранное", "Output folder"), "out")].iter().enumerate() {
-			let cx = x0 + i as f32 * (colw + 14.0);
-			ui.painter().galley(Pos2::new(cx, y), ui.fonts(|f| f.layout_job(caps_job(lbl, p.muted))), p.muted);
-			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(cx, y + label_h + 5.0), Vec2::new(colw, 36.0))));
-			let val = if *key == "proj" { &mut self.proj } else { &mut self.out };
-			let (_, clicked, _) = path_field(&mut r, &p, key, val, 36.0, "", tr("Обзор…", "Browse…"), false, !busy);
-			if clicked {
-				if let Some(d) = pick_folder(val) {
-					*val = d.display().to_string();
+			caption(ui, x0, y, tr("Куда сохранять для правки", "Project folder (for editing)"), p.muted);
+			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, y + label_h + 5.0), Vec2::new(w, 36.0))));
+			let (_, clicked, _) = path_field(&mut r, &p, "proj", &mut self.proj, 36.0, "", tr("Обзор…", "Browse…"), false, !busy);
+			if clicked
+				&& let Some(d) = pick_folder(&self.proj) {
+					self.proj = d.display().to_string();
 					self.save_settings();
 				}
-			}
-		}
-		y += label_h + 5.0 + 36.0 + 12.0;
+			y += label_h + 5.0 + 36.0 + 12.0;
 
-		let c1 = 260.0;
-		let c3 = w - c1 - 14.0;
-		let c2 = -14.0;
-		ui.painter().galley(Pos2::new(x0, y), ui.fonts(|f| f.layout_job(caps_job(tr("Игра", "Game"), p.muted))), p.muted);
-		ui.painter().galley(Pos2::new(x0 + c1 + c2 + 28.0, y), ui.fonts(|f| f.layout_job(caps_job(tr("Маска файлов", "File mask"), p.muted))), p.muted);
-		let fy = y + label_h + 5.0;
-		{
-			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, fy), Vec2::new(c1, 36.0))));
-			let items: Vec<String> = game_items().iter().map(|s| s.to_string()).collect();
-			let old = self.game_sel;
-			if combo(&mut r, &p, "game", &items, &mut self.game_sel, c1, 36.0, 8, f_body(13.5)) {
-				self.on_game_changed(old);
-				if let Some(g) = sel_game(self.game_sel) {
-					self.flash(&lformat!("Папки проекта и сборки — для {}", "Project and output folders: for {}", g.name()));
+			let cw = (w - 28.0) / 3.0;
+			caption(ui, x0, y, tr("Игра", "Game"), p.muted);
+			caption(ui, x0 + cw + 14.0, y, tr("Маска файлов", "File mask"), p.muted);
+			caption(ui, x0 + 2.0 * (cw + 14.0), y, tr("Что разбирать", "What to decompile"), p.muted);
+			let fy = y + label_h + 5.0;
+			{
+				let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, fy), Vec2::new(cw, 36.0))));
+				let items: Vec<String> = game_items().iter().map(|s| s.to_string()).collect();
+				let old = self.game_sel;
+				if combo(&mut r, &p, "game", &items, &mut self.game_sel, cw, 36.0, 8, f_body(13.5)) {
+					self.on_game_changed(old);
+					if let Some(g) = sel_game(self.game_sel) {
+						self.flash(&lformat!("Папки проекта и сборки — для {}", "Project and output folders: for {}", g.name()));
+					}
 				}
 			}
-		}
-		{
-			let mr = Rect::from_min_size(Pos2::new(x0 + c1 + c2 + 28.0, fy), Vec2::new(c3, 36.0));
-			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(mr));
-			r.painter().rect(mr, 8, p.surface, Stroke::new(1.0, p.div), StrokeKind::Inside);
-			let mut cr = r.new_child(egui::UiBuilder::new().max_rect(mr.shrink2(Vec2::new(12.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-			let resp = cr
-				.add(egui::TextEdit::singleline(&mut self.mask).frame(false).font(f_body(13.0)).desired_width(c3 - 24.0).interactive(!busy).hint_text(tr("все файлы", "all files")).margin(egui::Margin::ZERO))
-				.on_hover_text(tr("Только эти файлы, через запятую: c0100, t_town, c01*\nПусто — все файлы", "Only these files, comma-separated: c0100, t_town, c01*\nEmpty means all files"));
-			if resp.lost_focus() {
-				self.save_settings();
+			self.mask_field(ui, &p, Rect::from_min_size(Pos2::new(x0 + cw + 14.0, fy), Vec2::new(cw, 36.0)), busy);
+			{
+				let has = self.src_dir().is_some();
+				let t = match self.sel_items() {
+					Some(v) => lformat!("Файлы: {} из {}", "Files: {} of {}", v.iter().filter(|i| i.on).count(), v.len()),
+					None => tr("Файлы…", "Files…").to_string(),
+				};
+				let mut bu = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0 + 2.0 * (cw + 14.0), fy), Vec2::new(cw, 36.0))));
+				if small_button(&mut bu, &p, &t, Some("check"), 36.0, has && !busy, p.accent).on_hover_text(tr("Выбрать галочками, что разбирать", "Tick what to decompile")).clicked() {
+					self.open_pick(false, ctx);
+				}
 			}
-		}
-		y = fy + 36.0 + 18.0;
+			y = fy + 36.0 + 18.0;
+			let dec_part = self.sel_items().and_then(|v| {
+				let n = v.iter().filter(|i| i.on).count();
+				(n < v.len()).then_some((n, v.len()))
+			});
+			let title = if self.op == Some(Op::Decompile) { tr("Декомпиляция…", "Decompiling…") } else if dec_part.is_some() { tr("Декомпилировать выбранное", "Decompile selected") } else { tr("Декомпилировать всё", "Decompile all") };
+			let subt = match dec_part {
+				Some((n, m)) => lformat!("{n} из {m} → папка проекта (.json, .xlsx, .png)", "{n} of {m} → project folder (.json, .xlsx, .png)"),
+				None => tr("папка игры → папка для правки", "game folder → project folder").to_string(),
+			};
+			if action_button(ui, &p, Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, bh)), "dec", "archive", title, &subt, busy, self.op == Some(Op::Decompile), prog) {
+				self.start(Op::Decompile, ctx, false);
+			}
+		} else {
+			caption(ui, x0, y, tr("Папка для сборки", "Project folder (to build)"), p.muted);
+			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, y + label_h + 5.0), Vec2::new(w, 36.0))));
+			let (_, clicked, _) = path_field(&mut r, &p, "proj", &mut self.proj, 36.0, "", tr("Обзор…", "Browse…"), false, !busy);
+			if clicked
+				&& let Some(d) = pick_folder(&self.proj) {
+					self.proj = d.display().to_string();
+					self.save_settings();
+				}
+			y += label_h + 5.0 + 36.0 + 12.0;
 
-		let bw = (w - 14.0) / 2.0;
-		let bh = 76.0;
-		let prog = self.progress();
-		let dec_part = self.sel_items().and_then(|v| {
-			let n = v.iter().filter(|i| i.on).count();
-			(n < v.len()).then_some((n, v.len()))
-		});
-		for (i, op) in [Op::Decompile, Op::Compile].iter().enumerate() {
-			let rect = Rect::from_min_size(Pos2::new(x0 + i as f32 * (bw + 14.0), y), Vec2::new(bw, bh));
-			let resp = ui.interact(rect, ui.id().with(("main", i)), if busy { Sense::hover() } else { Sense::click() });
-			let primary = *op == Op::Decompile;
-			let running = self.op == Some(*op);
-			let hov = resp.hovered() && !busy;
-			let painter = ui.painter().with_clip_rect(rect.expand(1.0));
-			if primary {
-				painter.rect_filled(rect, 12, if hov { p.accent_strong } else { p.accent });
-			} else {
-				painter.rect(rect, 12, if hov { p.div2 } else { Color32::TRANSPARENT }, Stroke::new(1.0, p.accent), StrokeKind::Inside);
-			}
-			let (fg, sub) = if primary { (p.on_accent, p.on_accent.gamma_multiply(0.85)) } else { (p.text, p.muted) };
-			let ic = if primary { p.on_accent } else { p.accent };
-			let ix = rect.min.x + 20.0;
-			paint_icon(ui, if primary { "archive" } else { "package" }, Rect::from_min_size(Pos2::new(ix, rect.center().y - 13.0), Vec2::splat(26.0)), ic);
-			let title = match (op, running) {
-				(Op::Decompile, true) => tr("Декомпиляция…", "Decompiling…"),
-				(Op::Decompile, false) => if dec_part.is_some() { tr("Декомпилировать выбранное", "Decompile selected") } else { tr("Декомпилировать всё", "Decompile all") },
-				(Op::Compile, true) => tr("Сборка…", "Building…"),
-				(Op::Compile, false) => tr("Собрать", "Build"),
-			};
-			let subt = if primary {
-				match dec_part {
-					Some((n, m)) => lformat!("{n} из {m} → папка проекта (.json, .xlsx, .png)", "{n} of {m} → project folder (.json, .xlsx, .png)"),
-					None => tr("папка игры → папка для правки", "game folder → project folder").to_string(),
+			caption(ui, x0, y, tr("Куда сохранять собранное", "Output folder"), p.muted);
+			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(x0, y + label_h + 5.0), Vec2::new(w, 36.0))));
+			let (_, clicked, _) = path_field(&mut r, &p, "out", &mut self.out, 36.0, "", tr("Обзор…", "Browse…"), false, !busy);
+			if clicked
+				&& let Some(d) = pick_folder(&self.out) {
+					self.out = d.display().to_string();
+					self.save_settings();
 				}
-			} else {
-				tr("Проект → изменённые файлы игры (.bin, ._dt, .itp)", "Project → changed game files (.bin, ._dt, .itp)").to_string()
-			};
-			let tx = ix + 26.0 + 14.0;
-			painter.text(Pos2::new(tx, rect.center().y - 10.0), Align2::LEFT_CENTER, title, f_semi(21.0), fg);
-			painter.text(Pos2::new(tx, rect.center().y + 13.0), Align2::LEFT_CENTER, subt, f_body(13.0), sub);
-			if running {
-				if let Some(pr) = prog {
-					let br = Rect::from_min_size(Pos2::new(rect.min.x, rect.max.y - 4.0), Vec2::new(rect.width() * pr.clamp(0.0, 1.0), 4.0));
-					painter.with_clip_rect(rect.shrink(0.5)).rect_filled(br, egui::CornerRadius { nw: 0, ne: 0, sw: 12, se: if pr >= 0.99 { 12 } else { 0 } }, p.ok_strong);
-				}
-			}
-			if resp.clicked() {
-				self.start(*op, ctx, false);
-			}
-			if !busy {
-				resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+			y += label_h + 5.0 + 36.0 + 12.0;
+
+			caption(ui, x0, y, tr("Маска файлов", "File mask"), p.muted);
+			let fy = y + label_h + 5.0;
+			self.mask_field(ui, &p, Rect::from_min_size(Pos2::new(x0, fy), Vec2::new(w, 36.0)), busy);
+			y = fy + 36.0 + 18.0;
+			let title = if self.op == Some(Op::Compile) { tr("Сборка…", "Building…") } else { tr("Собрать", "Build") };
+			if action_button(ui, &p, Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, bh)), "build", "package", title, tr("Проект → изменённые файлы игры (.bin, ._dt, .itp)", "Project → changed game files (.bin, ._dt, .itp)"), busy, self.op == Some(Op::Compile), prog) {
+				self.start(Op::Compile, ctx, false);
 			}
 		}
 		y += bh + 14.0;
@@ -692,30 +741,36 @@ impl App {
 			let row = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(w, 32.0));
 			let mut r = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::right_to_left(egui::Align::Center)));
 			r.spacing_mut().item_spacing.x = 10.0;
-			if small_button(&mut r, &p, tr("Открыть собранное", "Open output"), Some("folder"), 32.0, true, p.text).clicked() {
-				open_folder(&self.out);
-				self.flash(tr("Открыта папка собранного", "Output folder opened"));
-			}
-			if small_button(&mut r, &p, tr("Открыть проект", "Open project"), Some("folder"), 32.0, true, p.text).clicked() {
+			if self.page == 1 {
+				if small_button(&mut r, &p, tr("Открыть собранное", "Open output"), Some("folder"), 32.0, true, p.text).clicked() {
+					open_folder(&self.out);
+					self.flash(tr("Открыта папка собранного", "Output folder opened"));
+				}
+			} else if small_button(&mut r, &p, tr("Открыть проект", "Open project"), Some("folder"), 32.0, true, p.text).clicked() {
 				open_folder(&self.proj);
 				self.flash(tr("Открыта папка проекта", "Project folder opened"));
 			}
-			if small_button(&mut r, &p, tr("Стоп", "Stop"), Some("stop"), 32.0, busy, p.warn).clicked() {
-				if let Some(s) = &self.shared {
+			let paused = busy && self.shared.as_ref().is_some_and(|s| s.pause.load(Ordering::SeqCst));
+			if small_button(&mut r, &p, tr("Стоп", "Stop"), Some("stop"), 32.0, busy, p.warn).clicked()
+				&& let Some(s) = &self.shared {
 					s.cancel.store(true, Ordering::SeqCst);
 				}
-			}
+			let tip = if paused { tr("Продолжить с того же места", "Continue from where it stopped") } else { tr("Приостановить: текущий файл доделается, следующий не начнётся", "Pause: the current file is finished, the next one does not start") };
+			if small_button(&mut r, &p, if paused { tr("Продолжить", "Continue") } else { tr("Пауза", "Pause") }, Some(if paused { "play" } else { "pause" }), 32.0, busy, if paused { p.accent_strong } else { p.text }).on_hover_text(tip).clicked()
+				&& let Some(s) = &self.shared {
+					s.pause.store(!paused, Ordering::SeqCst);
+				}
 			let left = r.min_rect();
 			let bar_w = (left.min.x - 12.0 - x0).max(50.0);
 			let pr = prog.unwrap_or(if self.last_done.is_some() && !busy { 1.0 } else { 0.0 });
 			let txt = Rect::from_min_size(Pos2::new(x0, y + 2.0), Vec2::new(bar_w, 16.0));
-			paint_text_clipped(ui, Rect::from_min_max(txt.min, Pos2::new(txt.max.x - 60.0, txt.max.y)), &self.status, f_body(12.0), p.muted, Align2::LEFT_CENTER);
+			paint_text_clipped(ui, Rect::from_min_max(txt.min, Pos2::new(txt.max.x - 60.0, txt.max.y)), if paused { tr("Пауза — нажмите «Продолжить»", "Paused: press Continue") } else { self.status.as_str() }, f_body(12.0), if paused { p.warn } else { p.muted }, Align2::LEFT_CENTER);
 			let pct = if busy { format!("{}%", (pr * 100.0).round() as i32) } else if self.last_done.is_some() { tr("готово", "done").into() } else { String::new() };
 			ui.painter().text(Pos2::new(x0 + bar_w, txt.center().y), Align2::RIGHT_CENTER, pct, f_body(12.0), p.muted);
 			let bar = Rect::from_min_size(Pos2::new(x0, y + 22.0), Vec2::new(bar_w, 6.0));
 			ui.painter().rect_filled(bar, 3, p.div2);
 			if pr > 0.0 {
-				ui.painter().rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar_w * pr.clamp(0.0, 1.0), 6.0)), 3, p.accent);
+				ui.painter().rect_filled(Rect::from_min_size(bar.min, Vec2::new(bar_w * pr.clamp(0.0, 1.0), 6.0)), 3, if paused { p.warn } else { p.accent });
 			}
 		}
 		y += 32.0 + 16.0;
@@ -800,7 +855,9 @@ impl App {
 				(tr("2 · Декомпилировать", "2 · Decompile"), tr("Разбирается то, что отмечено, — в «Куда сохранять для правки»: диалоги в .json, таблицы в .xlsx, текстуры в .png или .dds (формат — на втором шаге окна «Что разбирать»). Уже изменённые вами файлы не перезаписываются.", "The ticked items are unpacked into the 'Project folder': dialogues to .json, tables to .xlsx, textures to .png or .dds (the format is chosen in the second step of 'What to decompile'). Files you have already edited are not overwritten.")),
 				(tr("3 · Собрать", "3 · Build"), tr("Откроется окно «Что собрать» — отметьте папки, видно, где сколько изменено. Собираются только изменённые файлы — в «Куда сохранять собранное». Скопируйте собранное в папку игры с заменой (оригиналы сохраните).", "The 'What to build' window opens: tick the folders and see how many files changed in each. Only changed files are built, into the 'Output folder'. Copy the result into the game folder, replacing the files (keep the originals).")),
 			];
-			let cw = (ui.available_width() - 2.0 * 12.0) / 3.0;
+			let cards = if self.page == 0 { &cards[..2] } else { &cards[2..] };
+			let n = cards.len() as f32;
+			let cw = (ui.available_width() - (n - 1.0) * 12.0) / n;
 			let h = cards
 				.iter()
 				.map(|(_, t)| {
@@ -869,6 +926,7 @@ impl eframe::App for App {
 			self.src = dropped.iter().map(|x| x.display().to_string()).collect::<Vec<_>>().join("; ");
 			self.save_settings();
 			self.dec_sel = None;
+			self.page = 0;
 			self.open_pick(false, ctx);
 		}
 		egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg)).show(ctx, |ui| {
@@ -904,6 +962,9 @@ impl eframe::App for App {
 						} else {
 							let n = pk.n_on();
 							self.tex_dds = pk.tex_dds;
+							self.other_files = pk.other_files;
+							self.keep_failed = pk.keep_failed;
+							apply_sections(&self.proj, pk.sections);
 							self.save_settings();
 							self.dec_sel = Some((pk.dir.clone(), pk.items));
 							self.flash(&lformat!("Выбрано для разборки: {n}", "Selected to decompile: {n}"));
@@ -990,5 +1051,20 @@ pub fn run() {
 	};
 	if let Err(e) = eframe::run_native(TITLE, opts, Box::new(|cc| Ok(Box::new(App::new(cc))))) {
 		eprintln!("{e}");
+	}
+}
+
+fn apply_sections(proj: &str, on: bool) {
+	let proj = std::path::Path::new(proj.trim());
+	if proj.as_os_str().is_empty() {
+		return;
+	}
+	for s in crossbell_tool::crossbell::jobs::SECTIONS {
+		let d = proj.join(s);
+		if on {
+			let _ = std::fs::create_dir_all(&d);
+		} else {
+			let _ = std::fs::remove_dir(&d);
+		}
 	}
 }

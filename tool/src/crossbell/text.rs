@@ -78,13 +78,12 @@ pub fn encode(text: &str) -> Result<Vec<u8>, EncodeError> {
 			}
 			let esc: String = chars[i..chars.len().min(i + 5)].iter().collect();
 			let bytes = esc.as_bytes();
-			if esc.len() == 5 && (bytes[1] == b'x' || bytes[1] == b'X') && bytes[4] == b'}' {
-				if let Ok(v) = u8::from_str_radix(&esc[2..4], 16) {
+			if esc.len() == 5 && (bytes[1] == b'x' || bytes[1] == b'X') && bytes[4] == b'}'
+				&& let Ok(v) = u8::from_str_radix(&esc[2..4], 16) {
 					out.push(v);
 					i += 5;
 					continue;
 				}
-			}
 			return Err(EncodeError {
 				char_index: i,
 				message: tr("одиночная '{' — напишите '{{' для символа '{' или {xNN} для байта", "a single '{': write '{{' for the '{' character or {xNN} for a byte").into(),

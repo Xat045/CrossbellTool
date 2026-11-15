@@ -298,7 +298,7 @@ fn decompress(f: &mut Reader, out: &mut Vec<u8>) -> Result<(), Error> {
 			if op == 0 {
 				out.extend(f.slice(num)?);
 			} else {
-				ensure!(num <= out.len() - start, "itp32: repeat offset too large ({num} > {})", out.len() - start);
+				ensure!(num < out.len() - start, "itp32: repeat offset too large ({num} >= {})", out.len() - start);
 				for _ in 0..op {
 					out.push(out[out.len() - num - 1])
 				}

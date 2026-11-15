@@ -9,11 +9,11 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "CrossbellTool"
-path = "src/main.rs"
+path = "src/crossbell_main.rs"
 
 [[bin]]
 name = "CrossbellCompare"
-path = "src/kcompare_main.rs"
+path = "src/crossbell_compare_main.rs"
 
 [dependencies]
 calmare.path = "../libs/calmare"

@@ -9,28 +9,47 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use crate::gui_common::*;
-use crossbell_tool::kai::jobs::{self as kjobs, Counts};
 
-pub fn groups() -> [(&'static str, &'static str); 8] {
+pub fn groups() -> [(&'static str, &'static str); 12] {
 	[
-	(tr("Текст для перевода", "Text for translation"), tr("диалоги, таблицы, интерфейс", "dialogues, tables, interface")),
-	(tr("Моды", "Mods"), tr("папка mods", "mods folder")),
-	(tr("Текстуры", "Textures"), tr("картинки .png или .dds", ".png or .dds images")),
+	(tr("Текст для перевода", "Text for translation"), tr("диалоги и таблицы", "dialogues and tables")),
+	(tr("Интерфейс и меню", "Interface and menus"), tr("меню, экраны, надписи, значки", "menus, screens, captions, icons")),
+	(tr("Мини-игры и записки", "Mini-games and notes"), tr("мини-игры, рецепты, рыбалка", "mini-games, recipes, fishing")),
+	(tr("Картинки", "Pictures"), tr("иллюстрации, книги, плакаты", "illustrations, books, posters")),
+	(tr("Портреты", "Portraits"), tr("лица в диалогах", "faces in dialogue")),
+	(tr("Бой и эффекты", "Battle and effects"), tr("бой, эффекты", "battle, effects")),
+	(tr("Персонажи и монстры", "Characters and monsters"), tr("модели и анимации", "models and animations")),
+	(tr("Карты", "Maps"), tr("локации и их текстуры", "locations and their textures")),
 	(tr("Озвучка", "Voices"), tr("голоса персонажей", "character voices")),
-	(tr("Музыка и звуки", "Music and sounds"), tr("звуковые и визуальные эффекты", "sound and visual effects")),
-	(tr("Модели", "Models"), tr("персонажи, предметы, окружение", "characters, items, environment")),
+	(tr("Музыка и звуки", "Music and sounds"), tr("музыка и звуковые эффекты", "music and sound effects")),
 	(tr("Видео", "Video"), tr("ролики", "movies")),
 	(tr("Остальное", "Other"), tr("текста для перевода нет", "no text to translate")),
 ]
 }
 const G_TEXT: usize = 0;
-const G_MODS: usize = 1;
-const G_TEX: usize = 2;
-const G_VOICE: usize = 3;
-const G_SOUND: usize = 4;
-const G_MODELS: usize = 5;
-const G_VIDEO: usize = 6;
-const G_OTHER: usize = 7;
+const G_UI: usize = 1;
+const G_MINI: usize = 2;
+const G_ART: usize = 3;
+const G_FACE: usize = 4;
+const G_BATTLE: usize = 5;
+const G_MODELS: usize = 6;
+const G_MAPS: usize = 7;
+const G_VOICE: usize = 8;
+const G_SOUND: usize = 9;
+const G_VIDEO: usize = 10;
+const G_OTHER: usize = 11;
+
+const TEXT_PICS: [usize; 6] = [G_TEXT, G_UI, G_MINI, G_ART, G_FACE, G_BATTLE];
+
+fn group_of(key: &str, text: bool) -> usize {
+	if text { G_TEXT } else { crossbell_tool::crossbell::jobs::section_of(key) }
+}
+
+#[test]
+fn groups_match_sections() {
+	let names: Vec<&str> = groups().iter().map(|g| g.0).collect();
+	assert_eq!(names, crossbell_tool::crossbell::jobs::SECTIONS);
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -47,6 +66,7 @@ pub struct Item {
 	pub right: String,
 	pub right_ok: bool,
 	pub group: usize,
+	pub pics: bool,
 	pub on: bool,
 	pub size: u64,
 	pub unpacked: u64,
@@ -99,11 +119,13 @@ pub struct Picker {
 	pub items: Vec<Item>,
 	pub then_start: bool,
 	pub mod_mode: bool,
-	pub ed7: bool,
 	pending: Option<Arc<Mutex<Option<Vec<Item>>>>>,
 	pub tex_dds: bool,
 	pub tables_json: bool,
+	pub other_files: bool,
+	pub keep_failed: bool,
 	page: u8,
+	pub sections: bool,
 }
 
 pub fn plural(n: usize, one: &str, few: &str, many: &str) -> String {
@@ -130,162 +152,20 @@ pub fn fmt_size(b: u64) -> String {
 	}
 }
 
-fn describe(c: &Counts) -> String {
-	let mut v = Vec::new();
-	if c.scenes > 0 {
-		v.push(plural(c.scenes, tr("сцена", "scene"), tr("сцены", "scenes"), tr("сцен", "scenes")));
-	}
-	if c.scripts > 0 {
-		v.push(if c.scenes > 0 { plural(c.scripts, tr("другой скрипт", "other script"), tr("других скрипта", "other scripts"), tr("других скриптов", "other scripts")) } else { plural(c.scripts, tr("скрипт", "script"), tr("скрипта", "scripts"), tr("скриптов", "scripts")) });
-	}
-	if c.tables > 0 {
-		v.push(plural(c.tables, tr("таблица", "table"), tr("таблицы", "tables"), tr("таблиц", "tables")));
-	}
-	if c.images > 0 {
-		v.push(plural(c.images, tr("картинка", "image"), tr("картинки", "images"), tr("картинок", "images")));
-	}
-	if c.fonts > 0 {
-		v.push(plural(c.fonts, tr("шрифт", "font"), tr("шрифта", "fonts"), tr("шрифтов", "fonts")));
-	}
-	if c.yaml > 0 {
-		v.push(plural(c.yaml, tr("файл интерфейса", "interface file"), tr("файла интерфейса", "interface files"), tr("файлов интерфейса", "interface files")));
-	}
-	if c.other > 0 {
-		v.push(if v.is_empty() { plural(c.other, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files")) } else { plural(c.other, tr("другой файл", "other file"), tr("других файла", "other files"), tr("других файлов", "other files")) });
-	}
-	if v.is_empty() {
-		tr("пусто", "empty").into()
-	} else {
-		v.join(", ")
-	}
-}
-
-fn eng_suffix(s: &str) -> bool {
-	s.split('/').any(|seg| seg.ends_with("_eng") || seg.ends_with("_en") || seg.ends_with("_us"))
-}
-
-fn first_seg(s: &str) -> &str {
-	s.split('/').next().unwrap_or(s)
-}
-
-fn sound_name(s: &str) -> bool {
-	s.split('/').any(|seg| seg == "se" || seg.starts_with("se_") || seg.starts_with("vfx") || seg.starts_with("bgm") || seg.starts_with("sound") || seg.starts_with("music"))
-}
-
-fn game_item(s: kjobs::ScanItem) -> Item {
-	let stem = s.key.trim_end_matches(".p3a").to_string();
-	let base = stem.rsplit('/').next().unwrap_or(&stem).to_string();
-	let c = &s.counts;
-	let group = if s.in_mods {
-		G_MODS
-	} else if base == "multilanguage" || base.starts_with("script") || base.starts_with("table") || c.scenes + c.tables > 0 {
-		G_TEXT
-	} else if base.contains("image") {
-		G_TEX
-	} else if base.starts_with("voice") {
-		G_VOICE
-	} else if sound_name(&base) {
-		G_SOUND
-	} else if base.contains("model") || base.contains("cubemap") {
-		G_MODELS
-	} else if base.starts_with("movie") {
-		G_VIDEO
-	} else {
-		G_OTHER
-	};
-	let lang = if s.in_mods {
-		String::new()
-	} else if base == "multilanguage" {
-		let en = s.files.iter().any(|f| f.to_lowercase().contains("_en"));
-		let jp = s.files.iter().any(|f| f.to_lowercase().contains("_jp") || f.to_lowercase().contains("_ja"));
-		match (en, jp) {
-			(true, true) => tr("Английские и японские файлы", "English and Japanese files").into(),
-			(true, false) => tr("Английские файлы", "English files").into(),
-			(false, true) => tr("Японские файлы", "Japanese files").into(),
-			_ => String::new(),
-		}
-	} else if eng_suffix(&base) {
-		tr("Английские файлы", "English files").into()
-	} else if group == G_TEXT || group == G_VOICE {
-		tr("Японские файлы", "Japanese files").into()
-	} else if group == G_TEX {
-		tr("Японские и общие файлы", "Japanese and common files").into()
-	} else {
-		String::new()
-	};
-	let n = c.total();
-	let desc = if let Some(e) = &s.error {
-		lformat!("Не удалось прочитать: {e}", "Could not read: {e}")
-	} else if base == "multilanguage" {
-		lformat!("Найдено: {} — надписи интерфейса", "Found: {}, interface text", s.files.join(", "))
-	} else {
-		match group {
-			G_TEXT | G_MODS => lformat!("Найдено: {}", "Found: {}", describe(c)),
-			G_TEX => lformat!("{} → .png или .dds", "{} → .png or .dds", plural(c.images.max(n), tr("картинка", "image"), tr("картинки", "images"), tr("картинок", "images"))),
-			G_VOICE => lformat!("Озвучка · {}", "Voices · {}", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-			G_SOUND if base.starts_with("vfx") => lformat!("Визуальные эффекты · {}", "Visual effects · {}", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-			G_SOUND => lformat!("Звуковые эффекты · {}", "Sound effects · {}", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-			G_MODELS if base.contains("info") => lformat!("Описания моделей · {}", "Model descriptions · {}", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-			G_MODELS if base.contains("cubemap") => lformat!("Карты окружения · {}", "Environment maps · {}", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-			G_MODELS => lformat!("Модели · {}", "Models · {}", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-			_ => lformat!("{} — текста для перевода нет", "{}: no text to translate", plural(n, tr("файл", "file"), tr("файла", "files"), tr("файлов", "files"))),
-		}
-	};
-	Item { key: s.key, name: s.name, lang, desc, right: fmt_size(s.size), right_ok: false, group, on: true, size: s.size, unpacked: s.unpacked, changed: 0, out_key: String::new(), out_size: 0, mod_size: 0 }
-}
-
-fn proj_item(s: kjobs::ProjItem) -> Item {
-	let low = s.name.to_lowercase().replace('\\', "/");
-	let kind = s.kind.as_str();
-	let group = if kind.starts_with("script") || kind.starts_with("table") || kind == "multilanguage" {
-		G_TEXT
-	} else if low.contains("voice") {
-		G_VOICE
-	} else if low.contains("model") || low.contains("cubemap") {
-		G_MODELS
-	} else if sound_name(&low) {
-		G_SOUND
-	} else if low.contains("movie") {
-		G_VIDEO
-	} else if s.counts.images > 0 || kind.starts_with("asset") {
-		G_TEX
-	} else {
-		G_OTHER
-	};
-	let lang = if s.in_mods {
-		tr("Русский перевод (мод)", "Russian translation (mod)").to_string()
-	} else if kind == "multilanguage" {
-		String::new()
-	} else if eng_suffix(&low) {
-		tr("Английские файлы", "English files").to_string()
-	} else if group == G_TEXT || group == G_VOICE {
-		tr("Японские файлы", "Japanese files").to_string()
-	} else {
-		String::new()
-	};
-	let mut desc = describe(&s.counts);
-	if s.counts.scenes + s.counts.scripts > 0 && s.counts.tables == 0 && s.counts.images == 0 {
-		desc.push_str(" (.json)");
-	} else if s.counts.tables > 0 && s.counts.scenes + s.counts.scripts + s.counts.images == 0 {
-		desc.push_str(" (.xlsx)");
-	}
-	let _ = first_seg;
-	let (right, ok) = if s.changed > 0 { (lformat!("изменено {}", "{} changed", s.changed), true) } else { (tr("без изменений", "no changes").to_string(), false) };
-	Item { key: s.key, name: s.name, lang, desc, right, right_ok: ok, group, on: true, size: 0, unpacked: 0, changed: s.changed, out_key: s.archive, out_size: s.archive_size, mod_size: s.mod_size }
-}
-
-fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
+fn folder_items(v: Vec<crossbell_tool::crossbell::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 	let keys: std::collections::HashSet<String> = v.iter().map(|f| f.key.clone()).collect();
 	let decomp = mode == Mode::Decompile;
 	let mut out: Vec<Item> = v
 		.into_iter()
-		.filter(|f| f.scenes + f.tables + f.textures + f.others > 0)
+		.filter(|f| f.scenes + f.tables + f.textures + f.sprites + f.others > 0)
 		.map(|f| {
 			let text = f.scenes + f.tables > 0;
-			let group = if text { G_TEXT } else { G_TEX };
+			let group = group_of(&f.key, text);
 			let us = f.key.ends_with("_us");
-			let lang = if us {
+			let lang = if us || (f.scenes == 0 && f.tables > 0 && f.tables_us == f.tables) {
 				tr("Английские файлы", "English files")
+			} else if f.tables_us > 0 {
+				tr("Японские и английские файлы", "Japanese and English files")
 			} else if text {
 				tr("Японские файлы", "Japanese files")
 			} else if keys.contains(&format!("{}_us", f.key)) {
@@ -298,10 +178,14 @@ fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 				parts.push(format!("{} {}", plural(f.scenes, tr("сцена", "scene"), tr("сцены", "scenes"), tr("сцен", "scenes")), if decomp { ".bin → .json" } else { ".json → .bin" }));
 			}
 			if f.tables > 0 {
-				parts.push(format!("{} {}", plural(f.tables, tr("таблица", "table"), tr("таблицы", "tables"), tr("таблиц", "tables")), if decomp { "._dt → .xlsx" } else { ".xlsx → ._dt" }));
+				let game = if f.dt2 == 0 { "._dt" } else if f.dt2 == f.tables { ".dt2" } else { "._dt / .dt2" };
+				parts.push(format!("{} {}", plural(f.tables, tr("таблица", "table"), tr("таблицы", "tables"), tr("таблиц", "tables")), if decomp { format!("{game} → .xlsx") } else { format!(".xlsx → {game}") }));
 			}
 			if f.textures > 0 {
 				parts.push(format!("{} {}", plural(f.textures, tr("картинка", "image"), tr("картинки", "images"), tr("картинок", "images")), if decomp { tr(".itp → .png или .dds", ".itp → .png or .dds") } else { ".png / .dds → .itp" }));
+			}
+			if f.sprites > 0 {
+				parts.push(format!("{} {}", plural(f.sprites, tr("спрайт", "sprite"), tr("спрайта", "sprites"), tr("спрайтов", "sprites")), if decomp { tr(".itc → кадры .png", ".itc → .png frames") } else { tr("кадры .png → .itc", ".png frames → .itc") }));
 			}
 			if f.others > 0 {
 				parts.push(lformat!("{} как есть", "{} as is", plural(f.others, tr("другой файл", "other file"), tr("других файла", "other files"), tr("других файлов", "other files"))));
@@ -314,7 +198,7 @@ fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 			} else {
 				(tr("без изменений", "no changes").to_string(), false)
 			};
-			Item { key: f.key.clone(), name: format!("{}\\", f.name), lang: lang.to_string(), desc, right, right_ok: ok, group, on: true, size: f.size, unpacked: f.unpacked, changed: f.changed, out_key: f.key.clone(), out_size: f.out_size, mod_size: 0 }
+			Item { key: f.key.clone(), name: format!("{}\\", f.name), lang: lang.to_string(), desc, right, right_ok: ok, group, pics: f.textures + f.sprites > 0, on: true, size: f.size, unpacked: f.unpacked, changed: f.changed, out_key: f.key.clone(), out_size: f.out_size, mod_size: 0 }
 		})
 		.collect();
 	out.sort_by_key(|i| (i.group, i.key.trim_end_matches("_us").to_string(), !i.key.ends_with("_us")));
@@ -323,35 +207,21 @@ fn ed7_items(v: Vec<crossbell_tool::jobs::Ed7Folder>, mode: Mode) -> Vec<Item> {
 
 impl Picker {
 	fn fmt_kinds(&self) -> (bool, bool) {
-		(self.items.iter().any(|i| i.on && i.group == G_TEX), !self.ed7 && self.items.iter().any(|i| i.on && (i.group == G_TEXT || i.group == G_MODS)))
+		(self.items.iter().any(|i| i.on && i.pics), false)
 	}
 
 	fn fmt_title(&self) -> &'static str {
-		match self.fmt_kinds() {
-			(true, true) => tr("Формат файлов", "File format"),
-			(false, true) => tr("Формат таблиц", "Table format"),
-			_ => tr("Формат текстур", "Texture format"),
-		}
+		tr("Формат файлов", "File format")
 	}
 
-	pub fn open(mode: Mode, dir: &str, then_start: bool, mod_mode: bool, ctx: &egui::Context) -> Picker {
-		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode, ed7: false, pending: None, tex_dds: false, tables_json: false, page: 0 };
+	pub fn open(mode: Mode, dir: &str, then_start: bool, ctx: &egui::Context) -> Picker {
+		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode: false, pending: None, tex_dds: false, tables_json: false, other_files: false, keep_failed: true, page: 0, sections: false };
 		p.rescan(ctx);
 		p
 	}
 
-	pub fn with_items(mode: Mode, dir: &str, items: Vec<Item>, then_start: bool, mod_mode: bool) -> Picker {
-		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode, ed7: false, pending: None, tex_dds: false, tables_json: false, page: 0 }
-	}
-
-	pub fn open_ed7(mode: Mode, dir: &str, then_start: bool, ctx: &egui::Context) -> Picker {
-		let mut p = Picker { mode, dir: dir.to_string(), items: Vec::new(), then_start, mod_mode: false, ed7: true, pending: None, tex_dds: false, tables_json: false, page: 0 };
-		p.rescan(ctx);
-		p
-	}
-
-	pub fn with_items_ed7(mode: Mode, dir: &str, items: Vec<Item>, then_start: bool) -> Picker {
-		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode: false, ed7: true, pending: None, tex_dds: false, tables_json: false, page: 0 }
+	pub fn with_items(mode: Mode, dir: &str, items: Vec<Item>, then_start: bool) -> Picker {
+		Picker { mode, dir: dir.to_string(), items, then_start, mod_mode: false, pending: None, tex_dds: false, tables_json: false, other_files: false, keep_failed: true, page: 0, sections: false }
 	}
 
 	pub fn rescan(&mut self, ctx: &egui::Context) {
@@ -360,25 +230,13 @@ impl Picker {
 		self.items.clear();
 		let dir = PathBuf::from(&self.dir);
 		let mode = self.mode;
-		let ed7 = self.ed7;
 		let ctx = ctx.clone();
 		std::thread::spawn(move || {
-			if ed7 {
-				let v = match mode {
-					Mode::Decompile => crossbell_tool::jobs::scan_game_ed7(&dir),
-					Mode::Build => crossbell_tool::jobs::scan_project_ed7(&dir),
-				};
-				*slot.lock().unwrap() = Some(ed7_items(v, mode));
-				ctx.request_repaint();
-				return;
-			}
-			let items: Vec<Item> = match mode {
-				Mode::Decompile => kjobs::scan_game(&dir).into_iter().map(game_item).collect(),
-				Mode::Build => kjobs::scan_project(&dir).into_iter().map(proj_item).collect(),
+			let v = match mode {
+				Mode::Decompile => crossbell_tool::crossbell::jobs::scan_game_ed7(&dir),
+				Mode::Build => crossbell_tool::crossbell::jobs::scan_project_ed7(&dir),
 			};
-			let mut items = items;
-			items.sort_by_key(|i| (i.group, i.name.ends_with('\\')));
-			*slot.lock().unwrap() = Some(items);
+			*slot.lock().unwrap() = Some(folder_items(v, mode));
 			ctx.request_repaint();
 		});
 	}
@@ -401,15 +259,7 @@ impl Picker {
 	}
 
 	pub fn out_estimate(&self) -> u64 {
-		let on = self.items.iter().filter(|i| i.on);
-		if self.ed7 {
-			on.map(|i| i.out_size).sum()
-		} else if self.mod_mode {
-			self.items.first().map(|i| i.mod_size).unwrap_or(0)
-		} else {
-			let mut seen = std::collections::HashSet::new();
-			on.filter(|i| i.changed > 0 && !i.out_key.is_empty() && seen.insert(i.out_key.clone())).map(|i| i.out_size).sum()
-		}
+		self.items.iter().filter(|i| i.on).map(|i| i.out_size).sum()
 	}
 
 	pub fn n_on(&self) -> usize {
@@ -462,8 +312,9 @@ impl Picker {
 			let x1 = rect.max.x - 24.0;
 			let mut y = rect.min.y + 20.0;
 
-			let fmt_page = decomp && self.page == 1;
-			painter.text(Pos2::new(x0, y + 11.0), Align2::LEFT_CENTER, if fmt_page { self.fmt_title() } else if decomp { tr("Что разбирать", "What to decompile") } else { tr("Что собрать", "What to build") }, f_semi(19.0), p.text);
+		let fmt_page = decomp && self.page >= 1;
+		let struct_page = decomp && self.page == 2;
+			painter.text(Pos2::new(x0, y + 11.0), Align2::LEFT_CENTER, if struct_page { tr("Структура папок", "Folder structure") } else if fmt_page { self.fmt_title() } else if decomp { tr("Что разбирать", "What to decompile") } else { tr("Что собрать", "What to build") }, f_semi(19.0), p.text);
 			{
 				let t = if self.scanning() || fmt_page { "" } else { tr("Сканировать заново", "Rescan") };
 				let g = painter.layout_no_wrap(t.to_string(), f_body(13.0), p.accent);
@@ -478,21 +329,15 @@ impl Picker {
 			}
 			y += 30.0;
 			let n_all = self.items.len();
-			let headline = if fmt_page {
-				match self.fmt_kinds() {
-					(true, true) => tr("Отмечены текстуры и таблицы — в каком виде их разобрать для правки?", "Textures and tables are selected. In which format should they be decompiled for editing?").to_string(),
-					(false, true) => tr("Отмечены таблицы — в каком виде их разобрать для правки?", "Tables are selected. In which format should they be decompiled for editing?").to_string(),
-					_ => tr("Отмечены текстуры — в каком виде их разобрать для правки?", "Textures are ticked: in which format should they be unpacked for editing?").to_string(),
-				}
+			let headline = if struct_page {
+				tr("Как разложить разобранные файлы в папке проекта?", "How should the decompiled files be laid out in the project folder?").to_string()
+			} else if fmt_page {
+				tr("В каком виде разобрать файлы для правки и что делать с остальными?", "In what form to unpack the files for editing, and what to do with the rest?").to_string()
 			} else if self.scanning() {
 				if decomp { tr("Сканирую папку…", "Scanning the folder…").to_string() } else { tr("Смотрю папку проекта…", "Reading the project folder…").to_string() }
 			} else if decomp {
 				if n_all == 0 {
-					if self.ed7 {
-						tr("Подходящих папок не найдено — укажите папку игры или русификатора (в её data лежат scena_us, text_us…)", "No suitable folders found: choose the game folder or a translation mod's folder (its data folder holds scena_us, text_us…)").to_string()
-					} else {
-						tr("Подходящих архивов не найдено — укажите корневую папку игры (где лежат .p3a и папка mods)", "No suitable archives found: choose the game's root folder (the one with the .p3a files and the mods folder)").to_string()
-					}
+					tr("Подходящих папок не найдено — укажите папку игры или русификатора (в её data лежат scena_us, text_us…)", "No suitable folders found: choose the game folder or a translation mod's folder (its data folder holds scena_us, text_us…)").to_string()
 				} else {
 					let total: u64 = self.items.iter().map(|i| i.size).sum();
 					lformat!("Найдено {} ({}). По умолчанию отмечено всё — снимите лишнее.", "Found {} ({}). Everything is ticked by default: untick what you don't need.", plural(n_all, tr("пункт", "item"), tr("пункта", "items"), tr("пунктов", "items")), fmt_size(total))
@@ -516,8 +361,8 @@ impl Picker {
 			} else if fmt_page {
 				y += 30.0 + 12.0;
 			} else {
-				let text: &[usize] = if decomp { &[G_TEXT, G_MODS] } else { &[G_TEXT] };
-				let tex: &[usize] = if decomp { &[G_TEXT, G_MODS, G_TEX] } else { &[G_TEXT, G_TEX] };
+				let text: &[usize] = &[G_TEXT];
+				let tex: &[usize] = &TEXT_PICS;
 				let chips: [(&str, Option<&[usize]>); 4] = [(tr("Только текст", "Text only"), Some(text)), (tr("Текст+текстуры", "Text+textures"), Some(tex)), (tr("Всё", "All"), None), (tr("Снять всё", "Clear all"), Some(&[]))];
 				let mut cx = x0;
 				for (i, (label, g)) in chips.iter().enumerate() {
@@ -545,53 +390,46 @@ impl Picker {
 			let mut lu = ui.new_child(egui::UiBuilder::new().max_rect(list));
 			lu.set_clip_rect(list);
 			if fmt_page {
-				let ed7 = self.ed7;
 				let (has_tex, has_tab) = self.fmt_kinds();
-				let both = has_tex && has_tab;
-				let (card_h, line0, step) = if both { (78.0, 36.0, 18.0) } else { (92.0, 44.0, 20.0) };
-				let mut cy = list.min.y + if both { 6.0 } else { 16.0 };
-				if has_tex {
-					if both {
-						painter.text(Pos2::new(list.min.x + 12.0, cy + 8.0), Align2::LEFT_CENTER, tr("Текстуры", "Textures"), f_semi(13.0), p.muted);
-						cy += 22.0;
-					}
-					let opts: [(bool, &str, [&str; 2]); 2] = [
-						(false, tr(".png — обычные картинки", ".png: ordinary images"), [tr("Открываются в любом редакторе: Photoshop, GIMP, Paint.NET, Krita.", "They open in any editor: Photoshop, GIMP, Paint.NET, Krita."), tr("При сборке программа сожмёт их обратно в формат игры.", "When building, the program compresses them back into the game's format.")]),
-						(
-							true,
-							if ed7 { tr(".dds — данные игры без перекодирования", ".dds: game data without re-encoding") } else { tr(".dds — как в игре, без перевода в .png", ".dds: as in the game, no .png conversion") },
-							[
-								if ed7 { tr("Те же сжатые блоки BC7, что в .itp, со всеми уменьшенными копиями — без потерь.", "The same BC7 compressed blocks as in .itp, with all mipmaps: lossless.") } else { tr("Файлы игры копируются как есть — быстрее и без потерь качества.", "Game files are copied as they are: faster and with no quality loss.") },
-								tr("Нужен редактор с поддержкой DDS (Paint.NET, GIMP, плагин для Photoshop).", "You need an editor with DDS support (Paint.NET, GIMP, a Photoshop plugin)."),
-							],
-						),
-					];
-					for (i, (dds, title, lines)) in opts.iter().enumerate() {
-						if fmt_card(ui, &painter, p, Rect::from_min_size(Pos2::new(list.min.x + 12.0, cy), Vec2::new(list.width() - 30.0, card_h)), ("texfmt", i), self.tex_dds == *dds, title, lines, line0, step) {
-							self.tex_dds = *dds;
+				let gap = 10.0;
+				let cw = (list.width() - 30.0 - gap) / 2.0;
+				let (card_h, line0, step) = (70.0, 36.0, 17.0);
+				let mut cy = list.min.y + 6.0;
+				let row = |ui: &mut egui::Ui, cy: &mut f32, title: &str, id: &str, cur: bool, opts: [(bool, &str, [&str; 2]); 2]| -> Option<bool> {
+					painter.text(Pos2::new(list.min.x + 12.0, *cy + 8.0), Align2::LEFT_CENTER, title, f_semi(13.0), p.muted);
+					*cy += 22.0;
+					let mut pick = None;
+					for (i, (v, t, lines)) in opts.iter().enumerate() {
+						let r = Rect::from_min_size(Pos2::new(list.min.x + 12.0 + i as f32 * (cw + gap), *cy), Vec2::new(cw, card_h));
+						if fmt_card(ui, &painter, p, r, (id, i), cur == *v, t, lines, line0, step) {
+							pick = Some(*v);
 						}
-						cy += card_h + if both { 8.0 } else { 12.0 };
+					}
+					*cy += card_h + 10.0;
+					pick
+				};
+				if struct_page {
+					let sections = [(false, tr("Как в игре", "As in the game"), [tr("Папки игры прямо в папке проекта,", "The game's folders right in the project folder,"), tr("как раньше.", "as before.")]), (true, tr("По разделам", "By section"), [tr("Папки разделов программа создаст сама:", "The program creates the section folders itself:"), tr("«Текст для перевода», «Карты», «Портреты»…", "Text for translation, Maps, Portraits…")])];
+					if let Some(v) = row(ui, &mut cy, tr("Папки проекта", "Project folders"), "structfmt", self.sections, sections) {
+						self.sections = v;
+					}
+				} else {
+				if has_tex {
+					let dds = [tr("Те же блоки BC7, что в .itp, без потерь.", "The same BC7 blocks as in .itp, lossless."), tr("Нужен редактор с поддержкой DDS.", "Needs an editor that supports DDS.")];
+					if let Some(v) = row(ui, &mut cy, tr("Текстуры", "Textures"), "texfmt", self.tex_dds, [(false, tr(".png — обычные картинки", ".png: ordinary images"), [tr("Любой редактор: Photoshop, GIMP, Krita.", "Any editor: Photoshop, GIMP, Krita."), tr("При сборке сожмутся обратно.", "They are compressed back when building.")]), (true, tr(".dds — как в игре", ".dds: as in the game"), dds)]) {
+						self.tex_dds = v;
 					}
 				}
-				if has_tab {
-					if both {
-						painter.text(Pos2::new(list.min.x + 12.0, cy + 8.0), Align2::LEFT_CENTER, tr("Таблицы", "Tables"), f_semi(13.0), p.muted);
-						cy += 22.0;
+				if has_tab
+					&& let Some(v) = row(ui, &mut cy, tr("Таблицы", "Tables"), "tabfmt", self.tables_json, [(false, ".xlsx — Excel", [tr("Только текст для перевода.", "Only the text to translate."), tr("Рядом оригинал.", "The original is next to it.")]), (true, tr(".json — все поля", ".json: all fields"), [tr("Текст и числа с названиями полей.", "Text and numbers with field names."), tr("Записи добавлять и удалять нельзя.", "Records cannot be added or removed.")])]) {
+						self.tables_json = v;
 					}
-					let opts: [(bool, &str, [&str; 2]); 2] = [
-						(false, ".xlsx — Excel", [tr("Только текст для перевода, рядом оригинал.", "Only the text to translate, with the original next to it."), tr("Удобно переводить.", "Good for translating.")]),
-						(
-							true,
-							tr(".json — все поля таблицы", ".json: all table fields"),
-							[tr("Текст и числа с названиями полей, как в KuroTools.", "Text and numbers with field names, as in KuroTools."), tr("Удобно менять параметры и модели. Записи добавлять и удалять нельзя.", "Good for changing parameters and models. Records can't be added or removed.")],
-						),
-					];
-					for (i, (js, title, lines)) in opts.iter().enumerate() {
-						if fmt_card(ui, &painter, p, Rect::from_min_size(Pos2::new(list.min.x + 12.0, cy), Vec2::new(list.width() - 30.0, card_h)), ("tabfmt", i), self.tables_json == *js, title, lines, line0, step) {
-							self.tables_json = *js;
-						}
-						cy += card_h + if both { 8.0 } else { 12.0 };
-					}
+				if let Some(v) = row(ui, &mut cy, tr("Файлы без перевода (модели, сцены карт, звуки)", "Files without text (models, map scenes, sounds)"), "otherfmt", self.other_files, [(false, tr("Не класть в папку", "Leave them out"), [tr("Для перевода они не нужны.", "Not needed for translation."), tr("При сборке берутся из игры.", "The build takes them from the game.")]), (true, tr("Класть как есть", "Copy as they are"), [tr("Если хотите их менять.", "If you want to change them."), tr("Займут место на диске.", "They take disk space.")])]) {
+					self.other_files = v;
+				}
+				if let Some(v) = row(ui, &mut cy, tr("Если файл не получится разобрать", "If a file cannot be unpacked"), "failfmt", self.keep_failed, [(true, tr("Положить как есть", "Copy it as it is"), [tr("Файл игры без изменений,", "The game file unchanged,"), tr("в журнале — предупреждение.", "with a warning in the log.")]), (false, tr("Пропустить", "Skip it"), [tr("Файла в папке не будет,", "The file is not in the folder,"), tr("только запись в журнале.", "only a line in the log.")])]) {
+					self.keep_failed = v;
+				}
 				}
 			} else {
 			egui::ScrollArea::vertical().id_salt("pick_list").auto_shrink([false, false]).show(&mut lu, |ui| {
@@ -617,10 +455,6 @@ impl Picker {
 					ui.painter().galley(Pos2::new(hr.min.x + 40.0, hr.center().y - tg.size().y / 2.0), tg, p.muted);
 					let note = if g == G_OTHER && !decomp {
 						tr("попадут в сборку, только если изменены", "only go into the build if changed")
-					} else if self.ed7 && g == G_TEXT {
-						tr("диалоги и таблицы", "dialogues and tables")
-					} else if self.ed7 && g == G_TEX {
-						if decomp { tr("картинки .itp → .png или .dds", ".itp images → .png or .dds") } else { tr("картинки .png / .dds → .itp", ".png / .dds images → .itp") }
 					} else {
 						groups()[g].1
 					};
@@ -664,15 +498,22 @@ impl Picker {
 
 			let n_on = self.n_on();
 			let (has_tex, has_tab) = self.fmt_kinds();
-			let has_fmt = decomp && (has_tex || has_tab);
-			let (summary, hint) = if fmt_page {
+			let has_fmt = decomp;
+			let (summary, hint) = if struct_page {
+				let s = if self.sections { tr("По разделам — папки разделов создаются в папке проекта", "By section: section folders are created in the project folder") } else { tr("Как в игре — папки игры прямо в папке проекта", "As in the game: the game's folders right in the project folder") };
+				(s.to_string(), tr("Уже разобранные папки остаются там, где лежат", "Folders that are already decompiled stay where they are").to_string())
+			} else if fmt_page {
 				let tex = lformat!("Текстуры — в {}", "Textures: as {}", if self.tex_dds { ".dds" } else { ".png" });
 				let tab = lformat!("Таблицы — в {}", "Tables to {}", if self.tables_json { ".json" } else { ".xlsx" });
-				let s = match (has_tex, has_tab) {
-					(true, true) => format!("{tex} · {tab}"),
-					(false, true) => tab,
-					_ => tex,
-				};
+				let mut parts = Vec::new();
+				if has_tex {
+					parts.push(tex);
+				}
+				if has_tab {
+					parts.push(tab);
+				}
+				parts.push(lformat!("без перевода — {}", "without text: {}", if self.other_files { tr("класть", "copy") } else { tr("не класть", "leave out") }));
+				let s = parts.join(" · ");
 				(s, tr("Выбор запоминается — в следующий раз будет отмечен он же", "The choice is remembered and will be ticked next time").to_string())
 			} else if self.scanning() {
 				(tr("Идёт сканирование…", "Scanning…").to_string(), String::new())
@@ -691,7 +532,7 @@ impl Picker {
 				(lformat!("Выбрано {n_on} из {n_all} · {}{after}", "Selected {n_on} of {n_all} · {}{after}", fmt_size(size)), h)
 			} else {
 				let ch: usize = self.items.iter().filter(|i| i.on).map(|i| i.changed).sum();
-				let h = if self.ed7 { tr("Неотмеченные папки не собираются", "Unticked folders are not built").to_string() } else if self.mod_mode { tr("Неотмеченные папки войдут в мод без ваших правок", "Unticked folders go into the mod without your edits").to_string() } else { tr("Неотмеченные папки не пересобираются", "Unticked folders are not rebuilt").to_string() };
+				let h = tr("Неотмеченные папки не собираются", "Unticked folders are not built").to_string();
 				let out = self.out_estimate();
 				let after = if out > 0 { lformat!(" → запишется ≈ {}", " → writes ≈ {}", fmt_size(out)) } else { String::new() };
 				let h = match (out > 0, build_speed()) {
@@ -704,7 +545,7 @@ impl Picker {
 			painter.text(Pos2::new(x0, foot.center().y - 9.0), Align2::LEFT_CENTER, summary, f_semi(14.0), p.text);
 			painter.text(Pos2::new(x0, foot.center().y + 11.0), Align2::LEFT_CENTER, hint, f_body(12.0), p.muted);
 			let bh = 38.0;
-			let next = has_fmt && !fmt_page;
+			let next = has_fmt && self.page < 2;
 			let ok_label = if next { tr("Далее", "Next") } else if decomp { tr("Готово", "Done") } else { tr("Собрать", "Build") };
 			let ok_w = 120.0;
 			let ok_r = Rect::from_min_size(Pos2::new(x1 - ok_w, foot.center().y - bh / 2.0), Vec2::new(ok_w, bh));
@@ -713,7 +554,7 @@ impl Picker {
 			let ok_icon = if next { "arrow-right" } else if decomp { "check" } else { "archive" };
 			if primary_button_icon(&mut bu, p, ok_label, Some(ok_icon), ok_r.size(), 8, f_semi(14.5), can).clicked() {
 				if next {
-					self.page = 1;
+					self.page += 1;
 				} else {
 					ev = Event::Done;
 				}
@@ -722,7 +563,7 @@ impl Picker {
 			let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(cancel_r).layout(egui::Layout::right_to_left(egui::Align::Center)));
 			if small_button(&mut cu, p, if fmt_page { tr("Назад", "Back") } else { tr("Отмена", "Cancel") }, Some(if fmt_page { "arrow-left" } else { "x" }), bh, true, p.text).clicked() {
 				if fmt_page {
-					self.page = 0;
+					self.page -= 1;
 				} else {
 					ev = Event::Cancel;
 				}

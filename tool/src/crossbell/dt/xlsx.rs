@@ -44,7 +44,7 @@ fn write_raw(rows: &[(String, String, String)], data: &[(String, bool)], file_na
 		let ws = wb.add_worksheet();
 		ws.set_name(TEXT_SHEET).map_err(e)?;
 		ws.write_string_with_format(0, 0, "ID", &head).map_err(e)?;
-		ws.write_string_with_format(0, 1, &lformat!("Текст — редактируйте этот столбец ({file_name})", "Text: edit this column ({file_name})"), &head).map_err(e)?;
+		ws.write_string_with_format(0, 1, lformat!("Текст — редактируйте этот столбец ({file_name})", "Text: edit this column ({file_name})"), &head).map_err(e)?;
 		ws.write_string_with_format(0, 2, tr("Оригинал (для справки, при сборке не используется)", "Original (for reference, not used when building)"), &head).map_err(e)?;
 		ws.set_column_width(0, 8).map_err(e)?;
 		ws.set_column_width(1, 70).map_err(e)?;
@@ -104,8 +104,8 @@ pub fn to_table_text(data: &[u8]) -> Result<String, String> {
 		let id = row.first().map(cell_to_string).unwrap_or_default().trim().to_string();
 		if id.is_empty() { continue }
 		let t = row.get(1).map(cell_to_string).unwrap_or_default().replace("\r\n", "\n").replace('\r', "\n");
-		let t = crate::text::normalize(&t).into_owned();
-		if let Err(e) = crate::text::encode(&t) {
+		let t = crate::crossbell::text::normalize(&t).into_owned();
+		if let Err(e) = crate::crossbell::text::encode(&t) {
 			return Err(lformat!("лист «{TEXT_SHEET}», строка {} (ID {id}): {}", "sheet '{TEXT_SHEET}', line {} (ID {id}): {}", r + 1, e.message));
 		}
 		texts.insert(id, (t, r + 1));

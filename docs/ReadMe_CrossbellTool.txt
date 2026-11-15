@@ -1,4 +1,4 @@
-CrossbellTool 0.2: decompiles and builds the files of Trails from Zero and Trails to Azure (PC)
+CrossbellTool 0.3: decompiles and builds the files of Trails from Zero and Trails to Azure (PC)
   The Legend of Heroes: Trails from Zero   (zero.exe)
   The Legend of Heroes: Trails to Azure    (ao.exe)
 
@@ -11,12 +11,15 @@ WHAT IT DOES
 
 ──────────────────────────────── QUICK START
 
-  1. 'Game folder or files': the game folder or a translation mod's folder; its data folder is used. You can
+  The window has two tabs: 'Decompile' and 'Build'. They share the project folder, the file mask and the log.
+
+  1. The 'Decompile' tab. 'Game folder or files': the game folder or a translation mod's folder; its data folder is used. You can
      drop the folder on the window.
-  2. The 'What to decompile' window opens: tick what you need and click 'Done'.
-  3. 'Project folder (for editing)' is where the files go; 'Output folder' is the folder for the result.
+  2. The 'What to decompile' window opens: tick what you need, 'Next' for the file format, 'Next' for the folder
+     structure, 'Done'.
+  3. 'Project folder (for editing)' is where the files go; on the 'Build' tab, 'Output folder' is the folder for the result.
   4. 'Decompile all' → edit the files in the project folder.
-  5. 'Build' → tick the folders in the 'What to build' window → 'Build'.
+  5. The 'Build' tab, 'Build' → tick the folders in the 'What to build' window → 'Build'.
      Copy the result into the game's data folder, replacing the files (keep the originals).
 
 ──────────────────────────────── GAME
@@ -28,8 +31,9 @@ WHAT IT DOES
 ──────────────────────────────── DECOMPILING
 
   The 'What to decompile' window (opens by itself after you choose a folder; reopen it with the 'Files: N of M' button):
-  • the data folders under 'Text for translation' and 'Textures': how many scenes, tables and images,
-    English (._us) or Japanese files, and the size;
+  • the data folders by section: Text for translation, Interface and menus, Mini-games and notes, Pictures,
+    Portraits, Battle and effects, Characters and monsters, Maps, Voices, Music and sounds, Video, Other;
+    each shows how many scenes, tables and images, English (._us) or Japanese files, and the size;
   • everything is ticked by default; quick choices: 'Text only', 'Text+textures', 'All', 'Clear all';
   • at the bottom: how much the unpacked files will take and roughly how long (the time appears after the first
     decompile longer than 30 s on this computer).
@@ -37,6 +41,9 @@ WHAT IT DOES
   'File mask' limits the work to specific files: c0100, t_town, c01. (comma-separated; empty means all).
   Files you have already edited are not overwritten when you decompile again.
   All game files reach the project. Files the program can't decompile stay as they are and are not built without edits.
+  The last step of the window, 'Folder structure': 'As in the game' puts the data folders right in the project folder;
+  'By section' creates the section folders and puts the data folders into them (Project\Text for translation\scena_us\...),
+  while the project's internal files stay at the top. If the section folders already exist, decompiling and building find them.
 
   In the project folder you will find:
     scena_us\..json   dialogues: translate the strings in "text"

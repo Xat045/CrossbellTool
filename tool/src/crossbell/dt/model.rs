@@ -3,7 +3,7 @@ use crate::{leprintln, lformat, lprintln};
 #[allow(unused_imports)]
 use crate::lang::tr;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use crate::text;
+use crate::crossbell::text;
 
 pub type Res<T> = Result<T, String>;
 
@@ -194,7 +194,7 @@ impl<'a> Disc<'a> {
 		}
 
 		for (&slot, &(w, target)) in &self.ptrs {
-			let Some((&istart, _)) = items.range(..=slot).next_back().map(|(a, b)| (a, b)) else {
+			let Some((&istart, _)) = items.range(..=slot).next_back() else {
 				return Err(lformat!("указатель 0x{slot:X} вне блоков данных", "pointer 0x{slot:X} is outside the data blocks"));
 			};
 			let idx = index_of[&istart];
@@ -451,11 +451,10 @@ impl Doc {
 			}
 		}
 
-		if let Some(Raw::Str { text, .. }) = raws.last_mut() {
-			if text.last().map(|s| s.is_empty()) == Some(true) {
+		if let Some(Raw::Str { text, .. }) = raws.last_mut()
+			&& text.last().map(|s| s.is_empty()) == Some(true) {
 				text.pop();
 			}
-		}
 
 		let mut items = Vec::with_capacity(raws.len());
 		for r in raws {
@@ -497,7 +496,7 @@ impl Doc {
 }
 
 fn parse_hex(s: &str) -> Option<Vec<u8>> {
-	if s.len() % 2 != 0 { return None }
+	if !s.len().is_multiple_of(2) { return None }
 	(0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 

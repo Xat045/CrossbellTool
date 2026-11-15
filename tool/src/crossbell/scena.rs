@@ -61,8 +61,8 @@ fn decompile_inner(title: Title, data: &[u8]) -> Result<(String, Option<String>,
 
 pub fn decompile_json(title: Title, data: &[u8]) -> Result<(String, Option<String>), String> {
 	let (clm, warn, a) = decompile_inner(title, data)?;
-	let json = crate::scena_json::to_json(&clm)?;
-	let clm2 = crate::scena_json::from_json(&json).map_err(|e| lformat!("самопроверка JSON: {e}", "JSON self-check: {e}"))?;
+	let json = crate::crossbell::scena_json::to_json(&clm)?;
+	let clm2 = crate::crossbell::scena_json::from_json(&json).map_err(|e| lformat!("самопроверка JSON: {e}", "JSON self-check: {e}"))?;
 	let (b, _) = compile_inner(&clm2, tr("<проверка JSON>", "<JSON check>")).map_err(|e| lformat!("самопроверка JSON: {e}", "JSON self-check: {e}"))?;
 	if a != b {
 		return Err(tr("внутренняя ошибка: JSON собирается иначе, чем исходный скрипт", "internal error: the JSON builds differently from the source script").into());
@@ -71,8 +71,8 @@ pub fn decompile_json(title: Title, data: &[u8]) -> Result<(String, Option<Strin
 }
 
 pub fn compile_any(src: &str, file_name: &str) -> Result<(Vec<u8>, Vec<String>), String> {
-	if crate::scena_json::looks_like(src) {
-		let clm = crate::scena_json::from_json(src)?;
+	if crate::crossbell::scena_json::looks_like(src) {
+		let clm = crate::crossbell::scena_json::from_json(src)?;
 		match compile_inner(&clm, file_name) {
 			Ok(r) => Ok(r),
 			Err(_) => Err(json_errors(src, &clm)),
@@ -88,7 +88,7 @@ pub fn compile(src: &str, file_name: &str) -> Result<(Vec<u8>, Vec<String>), Str
 
 fn compile_inner(src: &str, file_name: &str) -> Result<(Vec<u8>, Vec<String>), String> {
 	let src = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-	let src = crate::text::normalize(src);
+	let src = crate::crossbell::text::normalize(src);
 	let src = if src.contains('\r') { src.replace("\r\n", "\n").replace('\r', "\n") } else { src.into_owned() };
 	let (val, diags) = calmare::parse(&src, None);
 	let rendered = render_diags(file_name, &src, &diags);
@@ -146,9 +146,9 @@ fn render_diags(file_name: &str, src: &str, diags: &[calmare::parse::Diag]) -> V
 }
 
 fn json_errors(json_src: &str, clm: &str) -> String {
-	let clm = crate::text::normalize(clm).into_owned();
+	let clm = crate::crossbell::text::normalize(clm).into_owned();
 	let (_, diags) = calmare::parse(&clm, None);
-	let json_norm = crate::text::normalize(json_src).into_owned();
+	let json_norm = crate::crossbell::text::normalize(json_src).into_owned();
 	let json_lines: Vec<&str> = json_norm.split('\n').collect();
 	let mut out = String::from(tr("ошибки в скрипте:\n", "errors in the script:\n"));
 	let mut any = false;
@@ -161,9 +161,8 @@ fn json_errors(json_src: &str, clm: &str) -> String {
 		let line_end = clm[start..].find('\n').map(|p| start + p).unwrap_or(clm.len());
 		let line = clm[line_start..line_end].trim_start_matches('\t');
 		let mut cands: Vec<String> = Vec::new();
-		if let Some(q) = d.text.1.split_once("encode \"").map(|x| x.1) {
-			if let Some(q) = q.rsplit_once("\" as") { cands.push(q.0.to_string()) }
-		}
+		if let Some(q) = d.text.1.split_once("encode \"").map(|x| x.1)
+			&& let Some(q) = q.rsplit_once("\" as") { cands.push(q.0.to_string()) }
 		for l in clm[line_start..end.max(line_end)].split('\n').skip(1) {
 			let l = l.trim_start_matches('\t');
 			if l.len() > 3 && l != "}" && l != "} {" { cands.push(l.to_string()) }
@@ -193,7 +192,7 @@ fn json_errors(json_src: &str, clm: &str) -> String {
 pub fn quick_json(title: Title, data: &[u8]) -> Result<String, String> {
 	let scena = read(title, data)?;
 	let text = calmare::to_string(title.game(), &calmare::Content::ED7Scena(scena), None);
-	crate::scena_json::to_json(&text)
+	crate::crossbell::scena_json::to_json(&text)
 }
 
 impl Title {
