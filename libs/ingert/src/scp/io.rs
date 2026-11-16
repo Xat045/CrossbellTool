@@ -68,6 +68,13 @@ pub fn read(data: &[u8]) -> Result<Scp, ReadError> {
 	raw_functions.sort_by_key(|f| f.code_start);
 
 	let func_ends = raw_functions.iter().skip(1).map(|f| Some(f.code_start)).chain([None]).collect::<Vec<_>>();
+	let patched = std::iter::zip(raw_functions.iter(), func_ends.iter()).any(|(func, end)| {
+		end.is_some() && f.clone().seek(func.code_start).is_ok() && {
+			let mut g = f.clone();
+			g.seek(func.code_start).is_ok() && code::read(&mut g, *end, func.number, &func_names, &global_names).is_err()
+		}
+	});
+	let func_ends = if patched { vec![None; func_ends.len()] } else { func_ends };
 	let mut functions = Vec::new();
 	for (func, end) in std::iter::zip(raw_functions, func_ends) {
 		let _span = tracing::error_span!("function", name = func.name).entered();
