@@ -617,14 +617,14 @@ impl App {
 					.iter()
 					.map(|w| {
 						let (t, l) = compare::count_ru(d, &all, w);
-						lformat!("«{w}» в русском: {} (в {})", "'{w}' in Russian: {} (in {})", plural(t, tr("раз", "time"), tr("раза", "times"), tr("раз", "time")), plural(l, tr("строке", "line"), tr("строках", "lines"), tr("строках", "lines")))
+						lformat!("«{w}» в русском: {} (в {})", "'{w}' in Russian: {} (in {})", plural(t, tr("раз", "time"), tr("раза", "times"), tr("раз", "times")), plural(l, tr("строке", "line"), tr("строках", "lines"), tr("строках", "lines")))
 					})
 					.collect::<Vec<_>>()
 					.join(" · ")
 			} else {
 				let each: Vec<String> = words.iter().map(|w| format!("{w} {}", compare::count_ru(d, &all, w).0)).collect();
 				let (t, l) = compare::count_ru_any(d, &all, &words);
-				lformat!("в русском: {} (в {}) — {}", "in Russian: {} (in {}), {}", plural(t, tr("раз", "time"), tr("раза", "times"), tr("раз", "time")), plural(l, tr("строке", "line"), tr("строках", "lines"), tr("строках", "lines")), each.join(", "))
+				lformat!("в русском: {} (в {}) — {}", "in Russian: {} (in {}), {}", plural(t, tr("раз", "time"), tr("раза", "times"), tr("раз", "times")), plural(l, tr("строке", "line"), tr("строках", "lines"), tr("строках", "lines")), each.join(", "))
 			});
 		}
 		self.rows = rows;
@@ -1824,9 +1824,9 @@ fn side_lang(d: &compare::Data, right: bool) -> &'static str {
 	} else if jp >= ru && jp * 4 >= en {
 		tr("Японский", "Japanese")
 	} else if ru >= en / 4 {
-		"Русский"
+		tr("Русский", "Russian")
 	} else {
-		"Английский"
+		tr("Английский", "English")
 	}
 }
 
