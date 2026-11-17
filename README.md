@@ -31,9 +31,13 @@ CrossbellTool:
 
 ![Choosing what to decompile](docs/screenshot_tool_files.jpg)
 
+![Choosing the project folder structure](docs/screenshot_tool_folders.jpg)
+
 CrossbellCompare:
 
 ![Comparing two languages line by line](docs/screenshot_compare.jpg)
+
+![Japanese text next to the translation, switched with the JP | EN buttons](docs/screenshot_compare_jp.jpg)
 
 ![Translation checks](docs/screenshot_checks.jpg)
 
